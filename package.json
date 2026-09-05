@@ -1,0 +1,29 @@
+{
+  "name": "webcraft",
+  "version": "1.0.0",
+  "private": true,
+  "description": "WebCraft \u2014 a browser-based voxel sandbox game (no install, no account).",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc --noEmit && vite build",
+    "preview": "vite preview",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:all": "npm run check && npm run smoke",
+    "smoke": "node scripts/smoke.mjs",
+    "check": "tsc --noEmit && vitest run && vite build",
+    "verify": "npm run check && npm run smoke"
+  },
+  "dependencies": {
+    "three": "^0.180.0"
+  },
+  "devDependencies": {
+    "@types/three": "^0.180.0",
+    "playwright-core": "^1.63.0",
+    "typescript": "^5.9.3",
+    "vite": "^7.2.4",
+    "vitest": "^3.2.4"
+  }
+}

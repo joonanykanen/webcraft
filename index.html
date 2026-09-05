@@ -1,0 +1,280 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no" />
+    <meta name="description" content="WebCraft — a browser-based voxel sandbox. Explore, mine, build and survive. No install, no account." />
+    <meta name="theme-color" content="#0d1117" />
+    <title>WebCraft — Voxel Sandbox</title>
+    <link rel="stylesheet" href="./styles.css" />
+    <link
+      rel="icon"
+      href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect width='16' height='16' fill='%237bb34a'/%3E%3Crect y='8' width='16' height='8' fill='%238a6a43'/%3E%3Crect x='3' y='3' width='3' height='3' fill='%235c8f36'/%3E%3C/svg%3E"
+    />
+  </head>
+  <body>
+    <div id="app">
+      <canvas id="viewport" aria-label="Game viewport"></canvas>
+
+      <!-- full-screen effects (water tint, hurt flash, fade) -->
+      <div id="fx-water" class="fx hidden"></div>
+      <div id="fx-hurt" class="fx hidden"></div>
+      <div id="fx-fade" class="fx hidden"></div>
+
+      <!-- ============================== HUD ============================== -->
+      <div id="hud" class="hidden">
+        <div id="crosshair" aria-hidden="true"></div>
+
+        <div id="stat-rows">
+          <div id="health-row" class="stat-row"></div>
+          <div id="hunger-row" class="stat-row"></div>
+          <div id="air-row" class="stat-row hidden"></div>
+        </div>
+
+        <div id="hotbar" role="toolbar" aria-label="Hotbar"></div>
+        <div id="hand-item" aria-hidden="true"><canvas width="72" height="72"></canvas></div>
+
+        <div id="debug" class="hidden"></div>
+        <div id="toasts" aria-live="polite"></div>
+        <div id="title-card" class="hidden"></div>
+      </div>
+
+      <!-- ========================= touch controls ========================= -->
+      <div id="touch-ui" class="hidden">
+        <div id="stick" aria-hidden="true"><div id="stick-knob"></div></div>
+        <div id="touch-buttons">
+          <button class="touch-btn" data-touch="jump" aria-label="Jump">▲</button>
+          <button class="touch-btn" data-touch="sneak" aria-label="Sneak">▼</button>
+          <button class="touch-btn" data-touch="up" aria-label="Fly up">↑</button>
+          <button class="touch-btn" data-touch="down" aria-label="Fly down">↓</button>
+          <button class="touch-btn" data-touch="mine" aria-label="Mine">⛏</button>
+          <button class="touch-btn" data-touch="place" aria-label="Place">▣</button>
+        </div>
+      </div>
+
+      <!-- ========================== tutorial ============================= -->
+      <div id="tutorial" class="hidden">
+        <div id="tutorial-card">
+          <h2 id="tutorial-title"></h2>
+          <p id="tutorial-body"></p>
+          <div class="row">
+            <button id="tutorial-skip" class="btn ghost">Skip tutorial</button>
+            <button id="tutorial-next" class="btn primary">Next</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- =========================== screens ============================= -->
+      <div id="screens">
+        <section id="screen-loading" class="screen active">
+          <div class="stack narrow">
+            <h1 class="logo">WebCraft</h1>
+            <p class="tagline">A voxel sandbox that runs in your browser.</p>
+            <div class="progress"><div id="load-bar"></div></div>
+            <p id="load-status" class="muted">Starting…</p>
+          </div>
+        </section>
+
+        <section id="screen-unsupported" class="screen">
+          <div class="stack narrow card">
+            <h1>Browser not supported</h1>
+            <p>WebCraft needs the following. Update your browser (or enable the feature) and reload.</p>
+            <ul id="support-list" class="checklist"></ul>
+            <p class="muted">Tested: Chrome / Edge (last 2), Firefox (last 2), Safari 16.4+.</p>
+          </div>
+        </section>
+
+        <section id="screen-main" class="screen">
+          <div class="stack narrow">
+            <h1 class="logo">WebCraft</h1>
+            <p class="tagline">Explore · Mine · Build · Survive</p>
+            <div class="col">
+              <button id="btn-quick-start" class="btn primary big">Create World</button>
+              <button id="btn-worlds" class="btn big">Select World</button>
+              <button id="btn-help" class="btn">How to Play</button>
+              <button id="btn-settings" class="btn">Settings</button>
+              <button id="btn-about" class="btn ghost">About &amp; Credits</button>
+            </div>
+            <p class="muted tiny">v1.0 · worlds are saved locally in your browser · no account needed</p>
+          </div>
+        </section>
+
+        <section id="screen-worlds" class="screen wide">
+          <header class="screen-head">
+            <h1>Worlds</h1>
+            <button class="btn back" data-back>← Back</button>
+          </header>
+          <div class="worlds-layout">
+            <div id="world-list" class="world-list" role="list"></div>
+            <div class="card" id="world-create">
+              <h2>Create a world</h2>
+              <label class="field"
+                ><span>Name</span><input id="new-name" type="text" maxlength="24" placeholder="New World" /></label
+              ><label class="field"
+                ><span>Seed (optional)</span><input id="new-seed" type="text" inputmode="numeric" placeholder="random"
+              /></label>
+              <label class="field"
+                ><span>Mode</span>
+                <div class="seg" id="new-mode">
+                  <button class="seg-btn active" data-mode="survival">Survival</button>
+                  <button class="seg-btn" data-mode="creative">Creative</button>
+                </div></label
+              >
+              <div class="row">
+                <button id="btn-create" class="btn primary">Create &amp; Play</button>
+              </div>
+              <p class="muted tiny">Up to 10 world slots. Same seed always produces the same world.</p>
+              <div class="divider"></div>
+              <h2>Import</h2>
+              <p class="muted tiny">Restore a <code>.webcraft.json</code> world file.</p>
+              <label class="btn file-btn">Import world file<input id="import-file" type="file" accept=".json,application/json" hidden /></label>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-settings" class="screen">
+          <header class="screen-head">
+            <h1>Settings</h1>
+            <button class="btn back" data-back>← Back</button>
+          </header>
+          <div id="settings-fields" class="settings-grid"></div>
+          <p class="muted tiny">Settings are stored locally and apply to every world.</p>
+        </section>
+
+        <section id="screen-help" class="screen">
+          <header class="screen-head">
+            <h1>How to play</h1>
+            <button class="btn back" data-back>← Back</button>
+          </header>
+          <div class="help-grid">
+            <div class="card">
+              <h2>Movement</h2>
+              <ul class="keys">
+                <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
+                <li><kbd>Space</kbd> Jump / swim up</li>
+                <li><kbd>Ctrl</kbd> or <kbd>Shift</kbd>+<kbd>Shift</kbd> Sprint</li>
+                <li><kbd>Shift</kbd> Sneak (won't walk off edges)</li>
+                <li><kbd>Space</kbd>×2 Toggle flight (creative)</li>
+                <li><kbd>Space</kbd>/<kbd>Shift</kbd> Fly up/down</li>
+                <li><kbd>E</kbd> Inventory &amp; crafting</li>
+                <li><kbd>Esc</kbd> Pause / release mouse</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h2>Building</h2>
+              <ul class="keys">
+                <li><kbd>LMB</kbd> hold Mine (per-block break time)</li>
+                <li><kbd>RMB</kbd> Place selected block</li>
+                <li><kbd>MMB</kbd> Pick block (creative)</li>
+                <li><kbd>1</kbd>–<kbd>9</kbd> / <kbd>wheel</kbd> Hotbar</li>
+                <li><kbd>Q</kbd> Drop selected stack</li>
+                <li><kbd>F3</kbd> Debug overlay</li>
+                <li><kbd>F</kbd> Toggle hand item view</li>
+                <li><kbd>R</kbd> Reload current world slot</li>
+              </ul>
+            </div>
+            <div class="card">
+              <h2>Survival tips</h2>
+              <ul class="plain">
+                <li>Punch trees → planks → crafting table → wooden pickaxe.</li>
+                <li>Stone drops cobblestone. Craft torches from coal + sticks.</li>
+                <li>Better tools mine faster; some ores need a better pickaxe.</li>
+                <li>Watch hearts &amp; hunger. Apples drop from leaves.</li>
+                <li>Hostile mobs appear in the dark at night — light up your base.</li>
+                <li>Autosave runs every 30 s; the world survives a refresh.</li>
+              </ul>
+            </div>
+          </div>
+        </section>
+
+        <section id="screen-about" class="screen">
+          <header class="screen-head">
+            <h1>About</h1>
+            <button class="btn back" data-back>← Back</button>
+          </header>
+          <div class="card prose">
+            <p>
+              <strong>WebCraft</strong> is an original voxel sandbox: an infinite procedural world, mining, building,
+              crafting, day/night lighting and survival — running entirely client-side on WebGL 2.
+            </p>
+            <ul class="plain">
+              <li>All textures, sounds and music are generated procedurally in your browser. No third-party assets.</li>
+              <li>World generation is fully deterministic: a seed gives the identical world on every browser.</li>
+              <li>Worlds are stored in IndexedDB as a seed + block diff, and can be exported as <code>.webcraft.json</code>.</li>
+              <li>No tracking, no network calls, no account. Everything stays on your machine.</li>
+            </ul>
+            <p class="muted">Not affiliated with, and not derived from, any commercial voxel game.</p>
+          </div>
+        </section>
+
+        <section id="screen-pause" class="screen">
+          <div class="stack narrow">
+            <h1 class="logo small">Paused</h1>
+            <div class="col">
+              <button id="btn-resume" class="btn primary big">Resume</button>
+              <button id="btn-save" class="btn">Save now</button>
+              <button id="btn-pause-settings" class="btn">Settings</button>
+              <button id="btn-quit" class="btn ghost">Save &amp; quit to menu</button>
+            </div>
+            <p id="pause-meta" class="muted tiny"></p>
+          </div>
+        </section>
+
+        <section id="screen-death" class="screen">
+          <div class="stack narrow">
+            <h1 class="logo small danger">You fell…</h1>
+            <p id="death-cause" class="muted"></p>
+            <div class="col">
+              <button id="btn-respawn" class="btn primary big">Respawn</button>
+              <button id="btn-death-quit" class="btn ghost">Save &amp; quit to menu</button>
+            </div>
+          </div>
+        </section>
+
+        <!-- inventory / crafting -->
+        <section id="panel-inventory" class="screen panel">
+          <div class="panel-box">
+            <header class="screen-head"><h1 id="inv-title">Inventory</h1><button class="btn small" id="btn-close-inv">Close (E)</button></header>
+            <div class="inv-layout">
+              <div class="inv-left">
+                <div class="craft-area">
+                  <div>
+                    <div class="grid grid-3" id="craft-grid"></div>
+                    <div class="grid-label" id="craft-label">2×2 — stand near a crafting table for 3×3</div>
+                  </div>
+                  <div class="arrow">➜</div>
+                  <div class="grid grid-1"><div class="slot result" id="craft-result"></div></div>
+                </div>
+                <div class="grid grid-9" id="inv-main"></div>
+                <div class="grid grid-9 hotbar" id="inv-hotbar"></div>
+                <div class="grid-label">Hotbar (1–9)</div>
+              </div>
+              <aside class="inv-right">
+                <h2>Recipe book</h2>
+                <input id="recipe-filter" type="text" placeholder="Filter recipes…" />
+                <div id="recipe-list"></div>
+                <p class="muted tiny">Click a recipe to move the ingredients into the grid.</p>
+              </aside>
+            </div>
+          </div>
+        </section>
+
+        <!-- chest -->
+        <section id="panel-chest" class="screen panel">
+          <div class="panel-box">
+            <header class="screen-head"><h1>Chest</h1><button class="btn small" id="btn-close-chest">Close</button></header>
+            <div class="grid grid-9" id="chest-grid"></div>
+            <div class="divider"></div>
+            <div class="grid grid-9" id="chest-inv-main"></div>
+            <div class="grid grid-9 hotbar" id="chest-inv-hotbar"></div>
+          </div>
+        </section>
+
+        <div id="cursor-stack" class="hidden"></div>
+        <div id="tooltip" class="hidden"></div>
+      </div>
+    </div>
+
+    <script type="module" src="./src/main.ts"></script>
+  </body>
+</html>
