@@ -353,7 +353,13 @@ export class MobManager {
   }
 
   spawn(kind: MobKind, pos: Vec3, host: EntityHost, hp?: number): Mob {
-    const mob = new Mob(this.nextId++, kind, pos, this.renderer, hp);
+    // A non-finite position would spread into the mesh matrix and render as garbage geometry.
+    const safe: Vec3 = {
+      x: Number.isFinite(pos.x) ? pos.x : 0.5,
+      y: Number.isFinite(pos.y) ? pos.y : 0,
+      z: Number.isFinite(pos.z) ? pos.z : 0.5,
+    };
+    const mob = new Mob(this.nextId++, kind, safe, this.renderer, hp);
     this.mobs.push(mob);
     host.renderer.addEntityMesh(mob.object);
     return mob;
@@ -487,7 +493,7 @@ export class MobManager {
       if (!host.world.isLoadedAt(x, z)) continue;
       const kind = kinds[Math.floor(this.rnd() * kinds.length)];
       const y = findSurfaceY(host, x, z, Math.ceil(SPECIES[kind].h));
-      if (y < 1 || y > CHUNK_SY - 3) continue;
+      if (!Number.isFinite(y) || y < 1 || y > CHUNK_SY - 3) continue;
       const light = host.world.getLight(x, y, z);
       // sunlight only counts while the sun is up, so nights and caves are "dark" for MO-3
       const level = Math.max(Math.round(light.sky * (1 - night)), light.blockLight);

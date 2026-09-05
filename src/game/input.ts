@@ -49,6 +49,10 @@ export class Input {
   wheel = 0;
   lookDX = 0;
   lookDY = 0;
+  /** True while we intentionally give up the pointer (panel, tutorial card). */
+  expectUnlock = false;
+  /** Timestamp of the last Space press; a tap can begin and end between two sim steps. */
+  jumpPressedAt = -1e12;
   sensitivity = 1;
   invertY = false;
   /** touch overrides (UI-4) */
@@ -113,6 +117,7 @@ export class Input {
     }
     if (GAME_KEYS.has(e.code) && this.active) e.preventDefault();
     this.down.add(e.code);
+    if (e.code === 'Space' && this.active) this.jumpPressedAt = performance.now();
     if (e.code === 'ShiftLeft') {
       const now = performance.now();
       if (now - this.lastShiftTap < 300) this.sprintHold = true;
@@ -174,6 +179,12 @@ export class Input {
       this.placing = false;
       this.down.clear();
     }
+    if (this.expectUnlock) {
+      // We handed the mouse to a panel / tutorial card on purpose; the app already knows
+      // and must not read this as "the player lost the pointer" (= open the pause screen).
+      this.expectUnlock = false;
+      return;
+    }
     this.onLockChange?.(this.locked);
   };
 
@@ -188,7 +199,9 @@ export class Input {
   }
 
   exitLock(): void {
-    if (document.pointerLockElement) document.exitPointerLock();
+    if (!document.pointerLockElement) return;
+    this.expectUnlock = true;
+    document.exitPointerLock();
   }
 
   isDown(code: string): boolean {
@@ -270,5 +283,20 @@ export class Input {
   endActions(): void {
     this.mining = false;
     this.placing = false;
+  }
+
+  /**
+   * Take or give up keyboard/mouse ownership (menus, panels, tutorial cards).
+   * Handing ownership over clears every held key, otherwise a player who opens a panel
+   * while running keeps running forever.
+   */
+  setActive(on: boolean): void {
+    if (this.active === on) return;
+    this.active = on;
+    if (!on) {
+      this.down.clear();
+      this.endActions();
+      this.sprintHold = false;
+    }
   }
 }

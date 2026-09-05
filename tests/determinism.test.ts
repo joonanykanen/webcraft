@@ -93,6 +93,9 @@ describe('terrain generation', () => {
     expect(gen(1337, 0, 0).hash).toBe(GOLDEN_1337['0,0']);
     expect(gen(1337, -4, 9).hash).toBe(GOLDEN_1337['-4,9']);
     expect(gen(1337, 31, -12).hash).toBe(GOLDEN_1337['31,-12']);
+    expect(gen(1337, 1, 0).hash).toBe(GOLDEN_1337['1,0']);
+    expect(gen(1337, -2, 3).hash).toBe(GOLDEN_1337['-2,3']);
+    expect(gen(1337, 7, -7).hash).toBe(GOLDEN_1337['7,-7']);
   });
 
   it('wraps bedrock at the bottom and never leaves the vertical range', () => {
@@ -158,9 +161,22 @@ describe('terrain generation', () => {
   });
 });
 
-/** Golden output of generateChunk for seed 1337 — see determinism.test notes. */
+/**
+ * Golden output of generateChunk for seed 1337 — see determinism.test notes.
+  * Last refreshed after three deliberate worldgen changes:
+ *  1. the decorator planted trunks at `h` instead of the surface block `h-1`, so every in-chunk
+ *     candidate was rejected — worlds had floating canopies and no trunks at all;
+ *  2. the temperature/humidity thresholds were unreachable, so Desert and Snow essentially never
+ *     occurred; they are now derived from the measured noise range (see column() in worldgen.ts),
+ *     which changes surface blocks (sand/snow) in many columns;
+ *  3. broadleaf trunks stopped one block too high and poked a bare log tip through the canopy.
+ * Worlds saved before these fixes keep their edits but gain trunks/biomes in untouched chunks.
+ */
 const GOLDEN_1337: Record<string, string> = {
-  '0,0': 'c447d654',
+  '0,0': '52deb0b6',
   '-4,9': 'bbbecf9b',
-  '31,-12': '26fe46b9',
+  '31,-12': '9846a779',
+  '1,0': 'b0b4483c',
+  '-2,3': '3a4e4c57',
+  '7,-7': '71bddf46',
 };

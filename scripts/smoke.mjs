@@ -28,7 +28,33 @@ function check(name, cond, info = '') {
   cond ? ok(name, info) : bad(name, info);
 }
 /** Hard step: an exception skips to the next section instead of aborting the run. */
-async function step(name, fn) {
+/**
+ * Tutorial cards intentionally take the mouse and freeze gameplay input while they are up
+ * (that is how their buttons stay clickable). A test driving raw input has to behave like a
+ * player who clicks "Next", so every step clears whatever card the previous step triggered.
+ */
+async function dismissCards(page) {
+  const dismissed = await page.evaluate(() => {
+    const card = document.getElementById('tutorial');
+    if (!card || card.classList.contains('hidden')) return false;
+    document.getElementById('tutorial-skip')?.click();
+    const g = window.webcraft.game;
+    if (g && g.screen === 'none') {
+      // A synthetic click carries no user activation, so the game cannot re-capture the
+      // pointer here; the harness takes ownership back the same way the other steps do.
+      g.input.setActive(true);
+      g.input.locked = true;
+    }
+    return true;
+  });
+  return dismissed;
+}
+
+let activePage = null;
+
+async function step(name, fn, opts = {}) {
+  const clear = activePage && !opts.keepCards;
+  if (clear) await dismissCards(activePage);
   try {
     const info = await fn();
     ok(name, info ?? '');
@@ -36,6 +62,8 @@ async function step(name, fn) {
   } catch (e) {
     bad(name, (e?.message ?? String(e)).split('\n')[0]);
     return false;
+  } finally {
+    if (clear) await dismissCards(activePage).catch(() => undefined);
   }
 }
 
@@ -51,7 +79,7 @@ function startServer() {
 
 const isActive = (id) => `!!document.querySelector('#${id}.active')`;
 
-async function startWorld(page, { name, seed, mode = 'survival' }) {
+async function startWorld(page, { name, seed, mode = 'survival', tutorial = 'skip' }) {
   if (!(await page.evaluate(isActive('screen-worlds')))) await page.click('#btn-worlds');
   await page.waitForFunction(isActive('screen-worlds'), null, { timeout: 10000 });
   if (name) await page.fill('#new-name', name);
@@ -64,6 +92,17 @@ async function startWorld(page, { name, seed, mode = 'survival' }) {
   await page.waitForFunction(() => !!window.webcraft?.game && !document.querySelector('.screen.active'), null, {
     timeout: 60000,
   });
+  // A fresh world opens with the intro card ~1.7 s after spawn, and the card (by design) owns
+  // the mouse and freezes gameplay input. Most steps don't want that; the tutorial step opts out.
+  if (tutorial === 'skip') {
+    await page.waitForTimeout(2000);
+    await page.evaluate(() => document.getElementById('tutorial-skip')?.click());
+    await page.evaluate(() => {
+      const g = window.webcraft.game;
+      g.input.setActive(true);
+      g.input.locked = true;
+    });
+  }
 }
 
 async function worldLoaded(page) {
@@ -147,6 +186,7 @@ async function main() {
 
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
   const page = await context.newPage();
+  activePage = page;
   const consoleErrors = [];
   const pageErrors = [];
   page.on('console', (m) => {
@@ -168,8 +208,13 @@ async function main() {
     });
 
     // ------------------------------------------------------------ create & load a world
-    await step('create world starts the game', () => startWorld(page, { name: 'Smoke Test', seed: '1337' }));
-    await step('terrain streams in (chunk meshes upload)', () => worldLoaded(page));
+    // keepCards: the intro card must survive until the step that exercises it
+    await step(
+      'create world starts the game',
+      () => startWorld(page, { name: 'Smoke Test', seed: '1337', tutorial: 'keep' }),
+      { keepCards: true },
+    );
+    await step('terrain streams in (chunk meshes upload)', () => worldLoaded(page), { keepCards: true });
 
     const hud = await page.evaluate(() => ({
       hotbar: document.querySelectorAll('#hotbar .slot').length,
@@ -183,6 +228,70 @@ async function main() {
     check('player starts with full health and food', hud.health >= 20 && hud.food >= 19, `health=${hud.health} food=${hud.food}`);
     check('debug overlay hidden by default', hud.debugHidden === true);
 
+    // ------------------------------------------------------------ tutorial owns the mouse? (UI-6)
+    await step('tutorial card releases the cursor so its buttons are clickable', async () => {
+      const up = await page.evaluate(() => {
+        const t = document.getElementById('tutorial');
+        return !!t && !t.classList.contains('hidden');
+      });
+      if (!up) return 'no card on screen (world already tutorial-taught) — skipped';
+      const gate = await page.evaluate(() => ({
+        locked: window.webcraft.game.input.locked,
+        active: window.webcraft.game.input.active,
+      }));
+      if (gate.locked) throw new Error('pointer stayed locked while a card was up — Next/Skip are unclickable');
+      if (gate.active) throw new Error('gameplay input stayed live behind the card');
+      await page.mouse.move(500, 350);
+      await page.click('#tutorial-next', { timeout: 4000 });
+      const hidden = await page.evaluate(() => document.getElementById('tutorial')?.classList.contains('hidden'));
+      if (!hidden) throw new Error('a real mouse click on Next did not dismiss the card');
+      // From here on the tour drives raw input, so act like a player who instantly clicks
+      // "Next" on every card: a card would otherwise freeze gameplay input mid-step.
+      await page.evaluate(() => {
+        window.__cardKiller = setInterval(() => {
+          const t = document.getElementById('tutorial');
+          if (t && !t.classList.contains('hidden')) document.getElementById('tutorial-skip')?.click();
+        }, 120);
+      });
+      return 'clicked Next with the real mouse';
+    }, { keepCards: true });
+
+    await step('clicking the world captures the pointer and moving it looks around (BI-1)', async () => {
+      await page.evaluate(() => {
+        const g = window.webcraft.game;
+        g.input.mining = false;
+        g.input.placing = false;
+        g.input.down.clear();
+      });
+      await page.mouse.click(500, 350);
+      await page.waitForTimeout(250);
+      const locked = await page.evaluate(() => ({
+        dom: !!document.pointerLockElement,
+        game: window.webcraft.game.input.locked,
+      }));
+      await page.evaluate(() => {
+        const g = window.webcraft.game;
+        g.input.mining = false;
+        g.input.placing = false;
+      });
+      if (!locked.dom || !locked.game) throw new Error(`pointer lock not engaged: ${JSON.stringify(locked)}`);
+      const before = await page.evaluate(() => ({ yaw: window.webcraft.game.player.yaw, pitch: window.webcraft.game.player.pitch }));
+      for (let i = 1; i <= 6; i++) await page.mouse.move(500 + i * 18, 350 - i * 5);
+      await page.waitForTimeout(200);
+      const after = await page.evaluate(() => ({ yaw: window.webcraft.game.player.yaw, pitch: window.webcraft.game.player.pitch }));
+      const turned = after.yaw - before.yaw;
+      const pitched = after.pitch - before.pitch;
+      if (!(Math.abs(turned) > 0.05)) throw new Error(`mouse X did not turn the camera (Δyaw=${turned.toFixed(4)})`);
+      if (!(Math.abs(pitched) > 0.02)) throw new Error(`mouse Y did not pitch the camera (Δpitch=${pitched.toFixed(4)})`);
+      if (Math.sign(turned) > 0) throw new Error(`mouse X turns the wrong way (Δyaw=${turned.toFixed(3)} for a rightward move)`);
+      // back to a horizontal, known view for the steps below
+      await page.evaluate(() => {
+        window.webcraft.game.player.yaw = 0;
+        window.webcraft.game.player.pitch = 0;
+      });
+      return `Δyaw=${turned.toFixed(3)} Δpitch=${pitched.toFixed(3)}`;
+    });
+
     const st = await page.evaluate(() => {
       const g = window.webcraft.game;
       return {
@@ -194,6 +303,25 @@ async function main() {
         onGround: g.player.onGround,
         y: +g.player.pos.y.toFixed(2),
         biome: g.world.biomeAt(Math.floor(g.player.pos.x), Math.floor(g.player.pos.z)),
+        // One pass over the columns near spawn: a trunk lives BELOW the canopy, so the window
+        // has to reach down past `heightAt` (which reports the canopy top in tree columns).
+        trees: (() => {
+          const px = Math.floor(g.player.pos.x);
+          const pz = Math.floor(g.player.pos.z);
+          let log = 0;
+          let leaf = 0;
+          for (let dx = -24; dx <= 24; dx++) {
+            for (let dz = -24; dz <= 24; dz++) {
+              const h = g.world.heightAt(px + dx, pz + dz);
+              for (let y = h + 10; y >= h - 12; y--) {
+                const b = g.world.getBlock(px + dx, y, pz + dz);
+                if (b === 4) log++;
+                else if (b === 6) leaf++;
+              }
+            }
+          }
+          return { log, leaf };
+        })(),
         fps: Math.round(g.fps),
         health: g.hudModel().health,
         food: g.hudModel().food,
@@ -205,6 +333,11 @@ async function main() {
       JSON.stringify(st),
     );
     check('render distance loads a field of chunks', st.chunks >= 38, `${st.chunks} chunks, ${st.drawCalls} draws`);
+    check(
+      'trees near spawn have trunks, not just canopies (WG-5)',
+      st.trees.log > 0 && st.trees.log * 20 > st.trees.leaf,
+      `logs=${st.trees.log} leaves=${st.trees.leaf} biome=${st.biome}`,
+    );
     await page.screenshot({ path: join(SHOTS, '01-spawn.png') });
 
     // ------------------------------------------------------------ debug overlay & fps
@@ -217,6 +350,52 @@ async function main() {
       if (!(fps > 5)) throw new Error(`fps too low for software GL: ${fps} (text: ${text.slice(0, 60)})`);
       if (!/seed \d+/.test(text)) throw new Error('debug overlay is missing world stats');
       return `${fps} fps`;
+    });
+
+    // ------------------------------------------------------------ mob rendering (MO-1)
+    await step('mobs render as finite geometry in front of the camera', async () => {
+      await dismissCards(page);
+      const r = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        g.input.locked = true;
+        g.input.active = true;
+        const p = g.player.pos;
+        const dx = 2.5;
+        const dz = -2.5;
+        const ground = g.world.heightAt(p.x + dx, p.z + dz); // deliberately fractional input
+        g.mobs.spawn('pig', { x: p.x + dx, y: ground + 0.1, z: p.z + dz }, g);
+        g.player.pitch = -0.1;
+        g.player.yaw = Math.atan2(-dx, -dz); // look direction is (-sin yaw, -cos yaw)
+        await new Promise((res) => setTimeout(res, 500));
+        let parts = 0;
+        let bad = 0;
+        let facing = 0;
+        const fx = -Math.sin(g.player.yaw) * Math.cos(g.player.pitch);
+        const fz = -Math.cos(g.player.yaw) * Math.cos(g.player.pitch);
+        for (const m of g.mobs.mobs) {
+          const ddx = m.pos.x - p.x;
+          const ddz = m.pos.z - p.z;
+          const len = Math.hypot(ddx, ddz) || 1;
+          facing = Math.max(facing, (fx * ddx + fz * ddz) / len);
+          m.object.traverse((o) => {
+            parts++;
+            if (
+              Number.isFinite(o.position.x) &&
+              Number.isFinite(o.position.y) &&
+              Number.isFinite(o.position.z) &&
+              Number.isFinite(o.scale.x)
+            )
+              return;
+            bad++;
+          });
+        }
+        return { mobs: g.mobs.mobs.length, parts, bad, ground, facing: +facing.toFixed(2) };
+      });
+      check('every mob transform is finite (NaN geometry used to fill the screen)', r.bad === 0, `${r.parts} transforms, ${r.bad} bad`);
+      check('mob models have cube parts', r.parts >= r.mobs * 4, `${r.parts} parts / ${r.mobs} mobs`);
+      check('the mob is in front of the camera (so the screenshot means something)', r.facing > 0.8, `facing=${r.facing}`);
+      await page.screenshot({ path: join(SHOTS, '07-mob.png') });
+      return `${r.mobs} mobs in view`;
     });
 
     // ------------------------------------------------------------ movement (PH-1)
@@ -237,6 +416,35 @@ async function main() {
       const moved = Math.hypot(p1.x - p0.x, p1.z - p0.z);
       if (!(moved > 0.5)) throw new Error(`player barely moved: Δ=${moved.toFixed(2)}`);
       return `Δ=${moved.toFixed(2)} blocks`;
+    });
+
+    await step('Ctrl+W sprint + a tapped Space still jumps (PH-2 input buffer)', async () => {
+      await page.evaluate(() => {
+        const g = window.webcraft.game;
+        g.input.locked = true;
+        g.input.active = true;
+        g.input.down.clear();
+        g.player.vel.x = g.player.vel.y = g.player.vel.z = 0;
+      });
+      await page.keyboard.down('Control');
+      await page.keyboard.down('w');
+      await page.waitForTimeout(450);
+      const run = await page.evaluate(() => ({
+        sprinting: window.webcraft.game.player.sprinting,
+        onGround: window.webcraft.game.player.onGround,
+        y: window.webcraft.game.player.pos.y,
+      }));
+      await page.keyboard.press('Space'); // instant tap: used to fall between two samples
+      let rose = 0;
+      for (let i = 0; i < 8; i++) {
+        await page.waitForTimeout(60);
+        rose = Math.max(rose, (await page.evaluate(() => window.webcraft.game.player.pos.y)) - run.y);
+      }
+      await page.keyboard.up('w');
+      await page.keyboard.up('Control');
+      if (!run.sprinting) throw new Error('Ctrl+W did not engage sprinting');
+      if (!(rose > 0.6)) throw new Error(`tapped Space did not jump (rose ${rose.toFixed(2)} blocks while sprinting)`);
+      return `sprint ${run.sprinting ? 'on' : 'off'}, rose ${rose.toFixed(2)} blocks`;
     });
 
     // ------------------------------------------------------------ mining with the mouse
@@ -427,8 +635,19 @@ async function main() {
 
     await step('Save writes the world to IndexedDB', async () => {
       await page.click('#btn-save');
-      await page.waitForFunction(() => !!document.querySelector('#toasts .toast'), null, { timeout: 15000 });
-      return (await page.locator('#toasts .toast').first().innerText()).trim();
+      // wait for the *save* toast specifically, not any toast that happens to be on screen
+      await page.waitForFunction(
+        () => [...document.querySelectorAll('#toasts .toast')].some((t) => /sav/i.test(t.textContent ?? '')),
+        null,
+        { timeout: 15000 },
+      );
+      return (
+        await page.evaluate(() =>
+          [...document.querySelectorAll('#toasts .toast')]
+            .map((t) => t.textContent?.trim())
+            .find((t) => /sav/i.test(t ?? '')),
+        )
+      ).toString();
     });
 
     await step('quit returns to the world list with the saved world', async () => {
@@ -541,6 +760,7 @@ async function main() {
 
     // ------------------------------------------------------------ creative sanity
     await step('creative mode: flight + instant break', async () => {
+      await dismissCards(page);
       if (!(await page.evaluate(isActive('screen-worlds')))) await page.click('#btn-worlds').catch(() => {});
       await startWorld(page, { name: 'Creative Check', seed: '2', mode: 'creative' });
       await worldLoaded(page);

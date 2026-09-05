@@ -457,6 +457,7 @@ export class Menus {
     if (!next) {
       this.tutorialActive = null;
       this.tutorialBox.classList.add('hidden');
+      this.releaseCard();
       return;
     }
     this.showTutorialCard(next);
@@ -468,8 +469,34 @@ export class Menus {
     this.cardTitle.textContent = t.title;
     this.cardBody.textContent = t.body;
     this.tutorialBox.classList.remove('hidden');
+    // The card has real buttons: without releasing pointer lock the cursor stays hidden
+    // inside the locked canvas and "Next" / "Skip" cannot be clicked at all.
+    this.cbs.game()?.setCardCapture(true);
     window.clearTimeout(this.tutorialTimer);
     this.tutorialTimer = window.setTimeout(() => this.dismissTutorial(false), 20000);
+  }
+
+  /** True while a tutorial card owns the mouse / keyboard. */
+  tutorialShowing(): boolean {
+    return this.tutorialActive !== null;
+  }
+
+  /** Keyboard path for the card. Returns true when the key was consumed. */
+  tutorialKey(code: string): boolean {
+    if (!this.tutorialActive) return false;
+    if (code === 'Enter' || code === 'NumpadEnter' || code === 'Space') {
+      this.advanceTutorial();
+      return true;
+    }
+    if (code === 'Escape' || code === 'Backspace') {
+      this.dismissTutorial(false);
+      return true;
+    }
+    return false;
+  }
+
+  private releaseCard(): void {
+    this.cbs.game()?.setCardCapture(false);
   }
 
   private advanceTutorial(): void {
@@ -483,6 +510,9 @@ export class Menus {
     this.tutorialActive = null;
     this.tutorialBox.classList.add('hidden');
     window.clearTimeout(this.tutorialTimer);
+    (document.activeElement as HTMLElement | null)?.blur?.();
+    this.releaseCard();
+    if (skipAll) this.cbs.notify('Tutorial dismissed — click the world to capture the mouse');
   }
 
   private markDone(key: TutorialEvent | 'intro' | null): void {

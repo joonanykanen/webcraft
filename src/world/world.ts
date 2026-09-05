@@ -137,21 +137,25 @@ export class World implements MeshWorld {
     return this.chunks.has(chunkKey(Math.floor(x / CHUNK_SX), Math.floor(z / CHUNK_SZ)));
   }
 
-  /** Top non-air block of a column. */
+  /** Top non-air block of a column (accepts fractional world coordinates). */
   heightAt(x: number, z: number): number {
-    const cx = Math.floor(x / CHUNK_SX);
-    const cz = Math.floor(z / CHUNK_SZ);
+    const wx = Math.floor(x);
+    const wz = Math.floor(z);
+    const cx = Math.floor(wx / CHUNK_SX);
+    const cz = Math.floor(wz / CHUNK_SZ);
     const c = this.chunks.get(chunkKey(cx, cz));
-    if (c) return c.columnHeight(x - cx * CHUNK_SX, z - cz * CHUNK_SZ) - 1;
-    return this.columnInfo(Math.floor(x), Math.floor(z)).h - 1;
+    if (c) return c.columnHeight(wx - cx * CHUNK_SX, wz - cz * CHUNK_SZ) - 1;
+    return this.columnInfo(wx, wz).h - 1;
   }
 
   biomeAt(x: number, z: number): BiomeId {
-    const cx = Math.floor(x / CHUNK_SX);
-    const cz = Math.floor(z / CHUNK_SZ);
+    const wx = Math.floor(x);
+    const wz = Math.floor(z);
+    const cx = Math.floor(wx / CHUNK_SX);
+    const cz = Math.floor(wz / CHUNK_SZ);
     const c = this.chunks.get(chunkKey(cx, cz));
-    if (c) return c.biomeAt(x - cx * CHUNK_SX, z - cz * CHUNK_SZ);
-    return this.columnInfo(Math.floor(x), Math.floor(z)).biome;
+    if (c) return c.biomeAt(wx - cx * CHUNK_SX, wz - cz * CHUNK_SZ);
+    return this.columnInfo(wx, wz).biome;
   }
 
   private columnInfo(x: number, z: number): ColumnInfo {
@@ -206,11 +210,13 @@ export class World implements MeshWorld {
 
   /** Highest solid block y in a loaded column, or -1 when unloaded. */
   surfaceY(x: number, z: number): number {
-    const cx = Math.floor(x / CHUNK_SX);
-    const cz = Math.floor(z / CHUNK_SZ);
+    const wx = Math.floor(x);
+    const wz = Math.floor(z);
+    const cx = Math.floor(wx / CHUNK_SX);
+    const cz = Math.floor(wz / CHUNK_SZ);
     const c = this.chunks.get(chunkKey(cx, cz));
     if (!c) return -1;
-    return c.columnHeight(x - cx * CHUNK_SX, z - cz * CHUNK_SZ) - 1;
+    return c.columnHeight(wx - cx * CHUNK_SX, wz - cz * CHUNK_SZ) - 1;
   }
 
   // ---------------------------------------------------------------- edits

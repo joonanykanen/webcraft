@@ -6,7 +6,9 @@ import {
   FLY_SPRINT_SPEED,
   FLY_SPEED,
   GRAVITY,
+  JUMP_BUFFER_S,
   JUMP_SPEED,
+  COYOTE_S,
   MAX_AIR,
   MAX_FOOD,
   MAX_HEARTS,
@@ -57,6 +59,9 @@ export class Player {
   private stepDistance = 0;
   private lastSurface = 'dirt';
   private spaceTapTime = -10;
+  private jumpBuffer = 0;
+  private coyote = 0;
+  private prevJump = false;
   private dpsAccum = 0;
   private readonly callbacks: PlayerCallbacks;
 
@@ -141,6 +146,16 @@ export class Player {
     }
     if (!allowFlight) this.flying = false;
 
+    // ---- jump intent: edge-detected and buffered (PH-2) ----
+    // Movement state is sampled at 60 Hz, so a fast tap can begin and end between two
+    // samples and read as "jump does nothing" (especially while sprinting past blocks).
+    // A short buffer keeps the intent alive; a coyote window covers leaving a ledge.
+    if (move.jump && !this.prevJump) this.jumpBuffer = JUMP_BUFFER_S;
+    this.prevJump = move.jump;
+    this.jumpBuffer = Math.max(0, this.jumpBuffer - dt);
+    this.coyote = this.onGround ? COYOTE_S : Math.max(0, this.coyote - dt);
+    const wantJump = move.jump || this.jumpBuffer > 0;
+
     // ---- horizontal wish direction ----
     const f = this.forward();
     const r = this.right();
@@ -177,7 +192,7 @@ export class Player {
     // ---- vertical ----
     if (this.flying) {
       let vy = 0;
-      if (move.jump || move.up) vy += FLY_SPEED * 0.8;
+      if (wantJump || move.up) vy += FLY_SPEED * 0.8;
       if (move.down || move.sneak) vy -= FLY_SPEED * 0.7;
       this.vel.y += (vy - this.vel.y) * Math.min(1, 12 * dt);
       if (this.pos.y < 1 && vy <= 0) {
@@ -187,14 +202,16 @@ export class Player {
     } else if (this.inWater) {
       this.vel.y -= GRAVITY * 0.22 * dt;
       this.vel.y *= 1 - Math.min(1, 2.6 * dt);
-      if (move.jump) this.vel.y = Math.min(4.2, this.vel.y + 16 * dt);
+      if (wantJump) this.vel.y = Math.min(4.2, this.vel.y + 16 * dt);
       if (move.down || move.sneak) this.vel.y -= 8 * dt;
       this.vel.y = clamp(this.vel.y, -4.5, 4.5);
     } else {
       this.vel.y -= GRAVITY * dt;
-      if (move.jump && this.onGround) {
+      if (wantJump && (this.onGround || this.coyote > 0)) {
         this.vel.y = JUMP_SPEED;
         this.onGround = false;
+        this.coyote = 0;
+        this.jumpBuffer = 0;
         this.callbacks.onJump();
       }
       this.vel.y = clamp(this.vel.y, -TERMINAL_VELOCITY, TERMINAL_VELOCITY);

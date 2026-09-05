@@ -75,10 +75,14 @@ export class TerrainContext {
     let biome: BiomeId;
     if (h <= SEA_LEVEL - 2) biome = OCEAN;
     else if (h <= SEA_LEVEL + 1) biome = BEACH;
-    else if (mountainMask > 0.5 && h > SEA_LEVEL + 34) biome = MOUNTAINS;
-    else if (warmth < 0.3) biome = SNOW;
-    else if (warmth > 0.64 && wet < 0.4) biome = DESERT;
-    else if (wet > 0.52) biome = FOREST;
+    // Thresholds are calibrated against the measured distribution of the climate noise
+    // (median 0.5, p02..p98 ≈ 0.25..0.75) so every biome actually occurs: with the earlier
+    // "obvious" numbers snow covered 3% of the map and desert 1.5% — effectively absent.
+    // Target mix: plains ~33%, forest ~18%, snow ~15%, desert ~7%, ocean ~10%, beach ~9%, mountains ~8%.
+    else if (mountainMask > 0.55 && h > SEA_LEVEL + 26) biome = MOUNTAINS;
+    else if (warmth < 0.4) biome = SNOW;
+    else if (warmth > 0.58 && wet < 0.47) biome = DESERT;
+    else if (wet > 0.56) biome = FOREST;
     else biome = PLAINS;
 
     let surface: number;
@@ -145,6 +149,13 @@ interface DecorTarget {
   baseZ: number;
 }
 
+const CROSS_OFFSETS: ReadonlyArray<readonly [number, number]> = [
+  [1, 0],
+  [-1, 0],
+  [0, 1],
+  [0, -1],
+];
+
 function paint(t: DecorTarget, wx: number, y: number, wz: number, id: number, onlyAir: boolean): void {
   const lx = wx - t.baseX;
   const lz = wz - t.baseZ;
@@ -187,9 +198,12 @@ function decorate(
       const wz = cellZ * CELL + jz;
       const col = columnAt(wx, wz);
       if (roll > col.fertility) continue;
-      if (col.h <= SEA_LEVEL + 1) continue; // nothing grows in water
+      if (col.h <= SEA_LEVEL) continue; // surface block must sit above the sea
       if (col.biome === OCEAN || col.biome === BEACH) continue;
-      const surfY = col.h - 1;
+      // NOTE: `col.h` is the y of the topmost solid block (the surface block itself),
+      // so the trunk starts at surfY + 1. Getting this off by one silently rejects every
+      // in-chunk candidate and leaves canopy edges floating in the neighbour chunk.
+      const surfY = col.h;
       const existing = blockAtWorld(wx, surfY, wz);
       if (existing !== -1 && existing !== col.surface) continue;
 
@@ -217,7 +231,7 @@ function decorate(
             }
           }
         }
-        paint(target, wx, topY + 1, wz, BlockId.LEAVES, true);
+        paint(target, wx, topY + 1, wz, BlockId.LEAVES, true); // pointed tip
       } else {
         const rad = 2;
         for (let dy = -2; dy <= 0; dy++) {
@@ -230,9 +244,14 @@ function decorate(
             }
           }
         }
+        // crown: a cross of leaves sits on top so the trunk end stays hidden
         paint(target, wx, topY + 1, wz, BlockId.LEAVES, true);
+        for (const [dx, dz] of CROSS_OFFSETS) paint(target, wx + dx, topY + 1, wz + dz, BlockId.LEAVES, true);
       }
-      for (let y = 0; y <= trunk; y++) paint(target, wx, surfY + 1 + y, wz, BlockId.LOG, false);
+      // trunk: for broadleaf trees it stops one block below the canopy top, otherwise the log
+      // pokes through the leaf plate and reads as a brown stump sitting on a lily pad
+      const top = spruce ? trunk : trunk - 1;
+      for (let y = 0; y <= top; y++) paint(target, wx, surfY + 1 + y, wz, BlockId.LOG, false);
     }
   }
 }

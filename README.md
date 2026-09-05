@@ -22,11 +22,12 @@ npm run preview
 
 | Key / button | Action |
 | --- | --- |
-| `W` `A` `S` `D` | Move (double-tap `W` or double-tap `Shift` to sprint) |
-| `Space` | Jump · swim upward · hold while flying to rise |
+| `W` `A` `S` `D` | Move |
+| `Ctrl` + `W`, double-tap `W`, or double-tap `Shift` | Sprint (uses more food) |
+| `Space` | Jump · swim upward · hold while flying to rise (120 ms input buffer + coyote time, so a fast tap is never lost) |
 | `Space` ×2 | Toggle flight (creative only) |
 | `Shift` | Sneak (will not walk off an edge) · hold while flying to descend |
-| `Mouse` | Look around |
+| `Mouse` | Look around (pointer lock; click the world to capture the mouse) |
 | **LMB** (hold) | Mine the block under the crosshair / attack a mob |
 | **RMB** | Place the held block, open a chest/crafting table, eat |
 | **MMB** | Pick block (creative) |
@@ -34,6 +35,7 @@ npm run preview
 | `E` | Inventory + crafting (2×2 by hand, 3×3 next to a crafting table) |
 | `Q` | Drop the selected stack |
 | `Esc` | Pause (also releases the mouse); closes panels |
+| `Enter` / `Esc` | Tutorial card: next step / dismiss (the card releases the mouse so its buttons are clickable) |
 | `F3` | Debug overlay (FPS, chunk/mesh stats, light, target, stats) |
 | `F` | Toggle the held-item view model |
 | `R` | Return to the spawn point (creative) |
@@ -166,7 +168,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 137 vitest tests (~10 s, Node environment)
+npm run test         # 151 vitest tests (9 files, ~10 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -175,27 +177,39 @@ npm run verify       # everything
 
 | Suite | Covers |
 | --- | --- |
-| `tests/determinism.test.ts` | RNG/hash/noise reproducibility, byte-identical regeneration, golden chunk hashes, bedrock/sea-level/ore-band invariants, `findSpawn` standability |
+| `tests/determinism.test.ts` | RNG/hash/noise reproducibility, byte-identical regeneration, golden chunk hashes (6 chunks), bedrock/sea-level/ore-band invariants, `findSpawn` standability |
 | `tests/mesher.test.ts` | face-culling parity against a naive reference (single block, touching blocks, random blob, enclosed shell), run-merge area conservation, water layer separation, AO differs from flat shading, vertex light bytes, attribute/index/tile bounds |
 | `tests/lighting.test.ts` | sky column rules, translucent filtering, torch falloff, light blocked by solids, chunk-seam spread, relight dirty reporting, nibble packing, border signatures, behaviour inside a generated world |
 | `tests/save.test.ts` | varint/RLE/base64 round-trips and compression, sparse diff round-trip (all ids, negative chunk keys, last voxel), edit replay into fresh chunks, checksum tamper detection, schema migration, file export/import losslessness, corrupt-file rejection |
 | `tests/physics.test.ts` | landing, no-tunnelling on huge steps, wall/ceiling stops, step assist, water detection, DDA raycast normals/reach/fluids, break times & drop-tier gating, placement rules |
 | `tests/gameplay.test.ts` | inventory stack/merge/quick-move/swap, tool wear & break, food selection, save round-trip, crafting grids (shapeless, trimmed shaped, table gating, consumption, resize, drain), recipe registry integrity, block/item registry consistency |
 | `tests/entities.test.ts` | explosion radius & witnesses, indestructible/fluid survival, TNT chaining and fuse, diff recording, gravity blocks and re-placing, drop pickup/expiry, mob caps/despawn/loot/chase/creative-immunity, day-vs-night spawn rules, sunburn, mob save round-trip |
-| `tests/survival.test.ts` | fall/landing/jump/walk/sprint/sneak speeds, fall damage + water + creative immunity, flight gating, breath & drowning & refill, hunger/starvation/regeneration/eating, damage window, respawn, void safety net |
+| `tests/survival.test.ts` | fall/landing/jump/walk/sprint/sneak speeds, jump input buffering + coyote time, fall damage + water + creative immunity, flight gating, breath & drowning & refill, hunger/starvation/regeneration/eating, damage window, respawn, void safety net |
+| `tests/worldgen-structure.test.ts` | trees actually grow trunks (no floating canopies), trunk columns are contiguous and stand on solid ground, no bare log tip pokes through a canopy, cacti on desert sand, all 7 biomes occur in sane shares, snow reaches the surface |
+
+### Golden world hashes
+
+World generation is fully deterministic, so six chunk hashes for seed 1337 are pinned in
+`tests/determinism.test.ts`. They are a *change detector*, not a spec: when you change worldgen
+on purpose the goldens move. Regenerate and commit them together with the reason —
+`npx vite-node scripts/gengolden.ts` prints the block to paste in, and the comment above the map
+documents why each refresh happened (existing saves keep their own edits and simply pick up the
+new generation in chunks nobody touched).
 
 ### Browser smoke test
 
 ```
-npm run smoke     # build + vite preview + real Chrome (39 checks, ~2 min)
+npm run smoke     # build + vite preview + real Chrome (47 checks, ~2 min)
 npm run verify    # check + smoke
 ```
 
 `scripts/smoke.mjs` serves the production build and drives **system Chrome** headless on
 SwiftShader WebGL2 (`playwright-core`, no browser download). Every section is a step, so one
 broken feature cannot cascade into the rest, and the run fails on any uncaught page error.
-It covers: capability probe → world creation form → terrain streaming → HUD structure →
-live game state → `F3` overlay (>5 fps) → `W` locomotion → hold-LMB mining (polls for the
+It covers: capability probe → world creation form → terrain streaming → the tutorial card
+releasing the cursor → HUD structure → live game state → trees near spawn have trunks →
+`F3` overlay (>5 fps) → a mob spawned in front of the camera with finite transforms →
+`W` locomotion → a real mouse move turning the camera → hold-LMB mining (polls for the
 break, so it is not timing-fragile) → RMB placement + a planted crafting table → `E` panel
 (9 + 27 slots, 2×2 or 3×3 depending on table range, 25-entry recipe book) → clicking a
 recipe crafts it → torch block light (0 → 14) → pause stats → save → quit → **Play again**
@@ -203,15 +217,30 @@ recipe crafts it → torch block light (0 → 14) → pause stats → save → q
 survive IndexedDB) → export to `.webcraft.json` → re-import and play the imported world →
 delete a slot → creative flight + break → settings sliders applied to the live game.
 
-Screenshots land in `smoke/` for eyeballing. Two real bugs were found by this test and
-fixed: vertex light bytes were uploaded as normalized ubytes while the mesher wrote 0–15,
-so the entire world rendered nearly black (now scaled to 0–255), and `input.active` was
-never enabled when a world started, so `E`/`Q`/digits did nothing until the first pause.
+**Look at the screenshots.** `smoke/*.png` are part of the test: assertions on numbers pass
+while the frame is obviously wrong. Five real bugs were found that way or by probing what a
+screenshot raised, and all are now covered:
+
+* light bytes uploaded as normalized ubytes while the mesher wrote 0–15 → the whole world
+  rendered nearly black (now scaled by `LIGHT_BYTE`);
+* `input.active` was never enabled when a world started → `E`/`Q`/digits did nothing;
+* `input.consumeLook()` had no caller → the mouse never turned the camera;
+* the tree decorator planted trunks at `h` instead of the surface block `h-1`, rejecting every
+  in-chunk candidate → worlds had floating canopy plates and *no trunks at all* (plus a second
+  off-by-one that poked a bare log tip through each crown), and the biome thresholds were
+  unreachable, so Desert/Snow essentially never appeared;
+* `World.heightAt(x, z)` indexed the column array with *fractional* coordinates, so a float
+  position returned NaN. A NaN spawn height reached the mob's mesh matrix and rendered as a
+  screen-filling garbage triangle. Accessors now floor their input and `MobManager.spawn`
+  refuses non-finite positions.
 
 Driving notes for whoever edits it next: gameplay is pointer-lock-free (the test sets
 `input.locked`/`input.active` and the held `mining`/`placing` flags), negative `player.pitch`
 looks *down*, `BlockId.TORCH` is 18 and `BlockId.CRAFTING_TABLE` is 20, and the in-game state
-has no active `.screen` element (use `window.webcraft.game` to detect play).
+has no active `.screen` element (use `window.webcraft.game` to detect play). The tutorial card
+captures the mouse and freezes input by design, so `startWorld()` dismisses it and
+`dismissCards()` clears any card that pops mid-run (it also restores `locked`/`active`, because
+a synthetic click carries no user activation and the browser will not re-enter pointer lock).
 
 ---
 

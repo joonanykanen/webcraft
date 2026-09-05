@@ -100,6 +100,11 @@ function onGlobalKey(e: KeyboardEvent): void {
     notify(`Debug overlay ${settings.debugOverlay ? 'on' : 'off'}`);
     return;
   }
+  // A tutorial card owns Enter/Space/Escape while it is on screen.
+  if (game && menus.tutorialKey(e.code)) {
+    e.preventDefault();
+    return;
+  }
   if (e.code !== 'Escape' || !game) return;
   if (menus.screen === 'settings' || menus.screen === 'help' || menus.screen === 'about') {
     e.preventDefault();

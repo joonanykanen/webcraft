@@ -983,8 +983,16 @@ ul.keys {
   display: none;
 }
 .slot.result {
-  background: #334a2c;
-  border-color: var(--accent-dim);
+  /* dashed well: an empty result slot must not look like a filled one */
+  background: rgba(12, 18, 32, 0.55);
+  border-color: rgba(150, 190, 255, 0.4);
+  border-style: dashed;
+}
+.slot.result:has(canvas) {
+  background: rgba(96, 150, 255, 0.2);
+  border-color: var(--accent);
+  border-style: solid;
+  box-shadow: 0 0 12px rgba(122, 174, 255, 0.35);
 }
 .slot.result:hover {
   border-color: var(--accent);

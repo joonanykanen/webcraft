@@ -321,4 +321,36 @@ describe('mobs (MO-1 … MO-4)', () => {
     expect(restored.mobs[0].hp).toBe(a.hp);
     expect(restored.mobs[0].pos.x).toBeCloseTo(a.pos.x, 3);
   });
+
+  it('refuses to spawn a mob at a non-finite position', () => {
+    // a NaN y used to reach the mesh matrix and render as a screen-filling garbage triangle
+    const host = makeHost(4790, 2);
+    const mobs = new MobManager(rendererStub);
+    const mob = mobs.spawn('pig', { x: 8.5, y: Number.NaN, z: 8.5 }, host);
+    expect(Number.isFinite(mob.pos.x)).toBe(true);
+    expect(Number.isFinite(mob.pos.y)).toBe(true);
+    expect(Number.isFinite(mob.pos.z)).toBe(true);
+    const p = mob.object.position;
+    expect(Number.isFinite(p.x + p.y + p.z)).toBe(true);
+    mobs.clear();
+  });
+});
+
+describe('World column accessors', () => {
+  it('tolerate fractional world coordinates', () => {
+    // callers pass player positions; a fractional index used to yield NaN heights
+    const host = makeHost(4791, 2);
+    for (const [x, z] of [
+      [0.5, 0.5],
+      [-3.25, 4.75],
+      [12.9, -0.1],
+      [8.5, 8.5],
+    ]) {
+      const h = host.world.heightAt(x, z);
+      expect(Number.isFinite(h), `heightAt(${x}, ${z})`).toBe(true);
+      expect(Number.isFinite(host.world.surfaceY(x, z))).toBe(true);
+      expect(host.world.biomeAt(x, z)).toBe(host.world.biomeAt(Math.floor(x), Math.floor(z)));
+      expect(h).toBe(host.world.heightAt(Math.floor(x), Math.floor(z)));
+    }
+  });
 });

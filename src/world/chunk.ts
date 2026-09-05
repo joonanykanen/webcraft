@@ -4,6 +4,18 @@ import type { BiomeId } from '../core/types.js';
 
 export type ChunkState = 'empty' | 'data' | 'meshed';
 
+/**
+ * Safe column index. Callers routinely pass world coordinates that were never floored
+ * (a player position is a float), and `height[3.5 * 16 + 2]` is `undefined` — which turns
+ * into NaN and silently poisons entity positions (giant garbage triangles on screen).
+ * Floor and clamp instead.
+ */
+function localIndex(lx: number, lz: number): number {
+  const x = Math.min(CHUNK_SX - 1, Math.max(0, Math.floor(lx)));
+  const z = Math.min(CHUNK_SZ - 1, Math.max(0, Math.floor(lz)));
+  return x * CHUNK_SZ + z;
+}
+
 export class Chunk {
   readonly cx: number;
   readonly cz: number;
@@ -53,11 +65,11 @@ export class Chunk {
   }
 
   biomeAt(lx: number, lz: number): BiomeId {
-    return this.biome[lx * CHUNK_SZ + lz] as BiomeId;
+    return this.biome[localIndex(lx, lz)] as BiomeId;
   }
 
   columnHeight(lx: number, lz: number): number {
-    return this.height[lx * CHUNK_SZ + lz];
+    return this.height[localIndex(lx, lz)];
   }
 
   recomputeHeights(): void {

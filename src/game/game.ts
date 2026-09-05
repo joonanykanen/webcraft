@@ -7,6 +7,7 @@ import {
   CHUNK_SX,
   CHUNK_SZ,
   DAY_LENGTH_MS,
+  JUMP_BUFFER_S,
   MAX_AIR,
   MAX_STACK,
   MAX_FOOD,
@@ -283,13 +284,30 @@ export class Game implements EntityHost {
   setScreen(s: Screen): void {
     if (this.screen === s) return;
     this.screen = s;
-    this.input.active = s === 'none';
+    this.input.setActive(s === 'none');
     this.input.uiKeys = s === 'inventory' || s === 'chest';
     this.input.endActions();
     if (s === 'none') this.input.requestLock();
     else this.input.exitLock();
     if (s !== 'chest') this.chestSlots = null;
     this.hooks.onScreen(s);
+  }
+
+  /**
+   * Hand the mouse to a floating DOM card (the tutorial overlay). While captured the
+   * pointer lock is released and gameplay input is ignored — otherwise the hidden cursor
+   * makes the card's own buttons unclickable.
+   */
+  setCardCapture(capture: boolean): void {
+    this.input.consumeLook();
+    if (capture) {
+      this.input.exitLock();
+      this.input.endActions();
+      this.input.setActive(false); // also releases held movement keys
+    } else if (this.screen === 'none' && !this.paused) {
+      this.input.requestLock();
+      this.input.setActive(true);
+    }
   }
 
   // ------------------------------------------------------------ main loop
@@ -299,6 +317,16 @@ export class Game implements EntityHost {
     let frameDt = (now - this.lastFrame) / 1000;
     this.lastFrame = now;
     if (frameDt > 0.5) frameDt = 0.5; // tab was hidden: don't fast-forward the sim
+
+    // ---- mouse look: apply accumulated pointer-lock / touch-look deltas (BI-1, UI-4) ----
+    // Nothing else in the engine consumes these, so a frame where they are not applied
+    // is a frame where the mouse "does nothing".
+    if (!this.paused && this.screen === 'none') {
+      const look = this.input.consumeLook();
+      if (look.dx !== 0 || look.dy !== 0) this.player.look(look.dx, look.dy);
+    } else {
+      this.input.consumeLook(); // panel owns the mouse: drop stale deltas
+    }
 
     // ---- fixed timestep simulation (20 TPS logic inside 60 FPS render) ----
     if (!this.paused) {
@@ -371,6 +399,9 @@ export class Game implements EntityHost {
     const t0 = performance.now();
     this.tickCount++;
     const move = this.input.move();
+    // Latch a Space tap that began and ended between two sim steps: without this a quick
+    // tap (or a tapped jump while sprinting) is sampled as "never pressed".
+    if (!move.jump && performance.now() - this.input.jumpPressedAt < JUMP_BUFFER_S * 1000) move.jump = true;
     this.player.update(dt, move, this.world, this.mode === 'creative');
     this.mobs.update(dt, this, this.nightFactor(), this.timeOfDay);
     this.entities.update(dt, this);

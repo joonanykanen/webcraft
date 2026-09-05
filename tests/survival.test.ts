@@ -293,3 +293,60 @@ describe('damage & respawn', () => {
     expect(p.health).toBe(0); // the void is lethal in survival
   });
 });
+
+describe('jump input (PH-2)', () => {
+  it('a tap that lasts a single sim step still jumps', () => {
+    // Movement is sampled once per 60 Hz step, so a fast tap can begin and finish between
+    // two samples. Without an input buffer that reads as "jump does nothing".
+    const w = world();
+    const p = playerAt();
+    sim(p, move(), w, 10);
+    let peak = p.pos.y;
+    for (let i = 0; i < 140; i++) {
+      p.update(1 / 60, i === 0 ? move({ jump: true }) : move(), w, false);
+      peak = Math.max(peak, p.pos.y);
+    }
+    expect(peak).toBeGreaterThan(GROUND + 0.8);
+    expect(p.pos.y).toBeCloseTo(GROUND, 2); // and landed again
+  });
+
+  it('jumping works while sprinting (Ctrl+W) and keeps the sprint speed', () => {
+    const w = world();
+    const run = playerAt();
+    sim(run, move(), w, 6);
+    let peak = run.pos.y;
+    for (let i = 0; i < 40; i++) {
+      run.update(1 / 60, move({ forward: 1, sprint: true, jump: i < 2 }), w, false);
+      peak = Math.max(peak, run.pos.y);
+    }
+    expect(run.sprinting).toBe(true);
+    expect(peak).toBeGreaterThan(GROUND + 0.5);
+    const walk = playerAt();
+    sim(walk, move({ forward: 1 }), w, 40);
+    // airborne steps accelerate less, so the jump must not cost momentum: a sprinting
+    // jumper covers at least as much ground as a walker over the same time
+    const ran = Math.hypot(run.pos.x - 4.5, run.pos.z - 4.5);
+    const walked = Math.hypot(walk.pos.x - 4.5, walk.pos.z - 4.5);
+    expect(ran).toBeGreaterThan(walked * 0.95);
+  });
+
+  it('a tap just after leaving the ground still jumps (coyote window)', () => {
+    const w = world();
+    const p = playerAt();
+    sim(p, move(), w, 10);
+    p.pos.y += 0.4;
+    p.vel.y = -1; // walked off a ledge
+    p.update(1 / 60, move(), w, false);
+    p.update(1 / 60, move({ jump: true }), w, false);
+    expect(p.vel.y).toBeGreaterThan(0);
+  });
+
+  it('does not jump in mid-air once the coyote window has passed', () => {
+    const w = world();
+    const p = playerAt(GROUND + 8);
+    sim(p, move(), w, 30); // long fall, well past the window
+    expect(p.onGround).toBe(false);
+    p.update(1 / 60, move({ jump: true }), w, false);
+    expect(p.vel.y).toBeLessThan(0);
+  });
+});
