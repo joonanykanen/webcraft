@@ -10,6 +10,7 @@ import * as idb from './save/idb.js';
 import { Hud, type HudSlotView } from './ui/hud.js';
 import { InventoryUI, type InventoryBindings } from './ui/inventory.js';
 import { loadSettings, Menus, saveSettings, type MenuCallbacks } from './ui/menus.js';
+import { BlockId } from './world/blocks.js';
 
 const canvas = must<HTMLCanvasElement>('viewport');
 const settings: Settings = loadSettings();
@@ -28,7 +29,7 @@ let playing = false;
 /** Live handle for the console (`webcraft.game.world.getBlock(...)`) and the browser smoke test. */
 declare global {
   interface Window {
-    webcraft?: { readonly game: Game | null; readonly version: string };
+    webcraft?: { readonly game: Game | null; readonly BlockId: typeof BlockId; readonly version: string };
   }
 }
 
@@ -44,7 +45,8 @@ function notify(text: string, kind: 'info' | 'warn' | 'good' = 'info'): void {
 
 // ------------------------------------------------------------ boot (MM-5 capability probe)
 function boot(): void {
-  window.webcraft = { get game(): Game | null { return game; }, version: '1.0.0' };
+  // Debug/inspection surface used by the smoke tests and the probes in scripts/.
+  window.webcraft = { get game(): Game | null { return game; }, BlockId, version: '1.0.0' };
   hud = new Hud();
   menus = new Menus(menuCallbacks(), settings);
   const probe = Renderer.probe();
@@ -79,11 +81,21 @@ function boot(): void {
   window.addEventListener('keydown', unlock, { once: true });
 
   menus.show('main');
-  if (settings.showTouchControls || (navigator.maxTouchPoints ?? 0) > 0) menus.setTouchVisible(true);
+  // Only a genuinely coarse pointer (phone/tablet) may switch touch UI on by itself.
+  // `maxTouchPoints > 0` is also true for touch-screen laptops, and enabling touch controls there
+  // used to activate a second look input under the mouse — see Input.addLook() and the drag handler
+  // in Menus.wireTouch().
+  if (settings.showTouchControls || coarsePointer()) menus.setTouchVisible(true);
 }
 
 function webkitAudioCtx(): unknown {
   return (window as unknown as { webkitAudioContext?: unknown }).webkitAudioContext;
+}
+
+/** True on phones/tablets: a touch-primary device, not merely a device that can also be touched. */
+function coarsePointer(): boolean {
+  if (typeof window.matchMedia === 'function' && window.matchMedia('(pointer: coarse)').matches) return true;
+  return (navigator.maxTouchPoints ?? 0) > 0 && !window.matchMedia;
 }
 
 function applyViewport(): void {
@@ -98,6 +110,14 @@ function applyViewport(): void {
 }
 
 function onGlobalKey(e: KeyboardEvent): void {
+  if (e.code === 'Tab') {
+    // UI-6: the goal card fades out on its own; Tab pins it open, Tab again lets it fade.
+    if (!game || !playing || game.screen !== 'none') return;
+    e.preventDefault();
+    const pinned = hud.toggleMilestonePinned();
+    notify(pinned ? 'Goal card pinned' : 'Goal card will fade out');
+    return;
+  }
   if (e.code === 'F3') {
     e.preventDefault();
     settings.debugOverlay = !settings.debugOverlay;
@@ -268,6 +288,7 @@ async function play(record: WorldRecord, fresh: boolean): Promise<void> {
         invUI?.refresh();
       },
       onMilestone: (_view: MilestoneView) => {
+        hud.focusMilestones(); // an achieved goal is worth looking at (UI-6)
         hud.markDirty();
         if (menus.milestoneShowing()) menus.renderMilestones(game?.milestoneViews() ?? []);
       },
@@ -296,7 +317,7 @@ async function play(record: WorldRecord, fresh: boolean): Promise<void> {
   playing = true;
   hud.setVisible(true);
   hud.setDebugVisible(settings.debugOverlay);
-  menus.setTouchVisible(settings.showTouchControls || (navigator.maxTouchPoints ?? 0) > 0);
+  menus.setTouchVisible(settings.showTouchControls || coarsePointer());
   menus.show('none');
   // Mouse look needs no browser permission: the cursor simply disappears over the world and the
   // first click captures it. Nothing to hint about, nothing for the browser to warn about.
@@ -346,6 +367,10 @@ function bindings(): InventoryBindings {
 
 function onScreen(s: Screen): void {
   if (!game) return;
+  // UI-6: one rule for the goal card, from the one place that knows what is on screen. Any panel
+  // counts as "the goal is what you are acting on", and returning to play re-shows it for a while —
+  // so closing the crafting table puts the next goal back up, and it never stays up forever.
+  hud.setMilestoneContext(s !== 'none');
   switch (s) {
     case 'none':
       invUI?.stash();
@@ -393,6 +418,7 @@ function closePanel(): void {
 
 function startHudLoop(): void {
   window.clearInterval(hudTimer);
+  hud.resetMilestones(); // a fresh world starts with an unpinned goal card
   hudTimer = window.setInterval(() => {
     if (!game || !playing) return;
     const m = game.hudModel();

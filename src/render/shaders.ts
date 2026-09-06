@@ -25,7 +25,13 @@ void main() {
   vDepth = -mv.z;
   vWorld = world.xyz;
   float fu = fract(aUV.x) * 0.9375 + 0.03125;
-  float fv = aUV.y * 0.9375 + 0.03125;
+  // The mesher writes aUV.y = 1 at the TOP vertex of every face, while the atlas art is authored
+  // top-to-bottom on a canvas (row 0 = drawn first = visually the top). The atlas is uploaded with
+  // flipY = false because the tile *row* is derived from the tile index counting down the canvas, so
+  // the mirror has to happen inside the tile: 1 - v, inset by the same 1/32 px that keeps fract()
+  // tiling from bleeding into the neighbouring tile. Without this every asymmetric tile is vertically
+  // mirrored on blocks — grass fringe along the bottom of the dirt, flame at the base of a torch.
+  float fv = (1.0 - aUV.y) * 0.9375 + 0.03125;
   vec2 tilePos = vec2(mod(aTile, 8.0), floor(aTile / 8.0));
   vUV = (tilePos + vec2(fu, fv)) / 8.0;
   vLight = aLight;

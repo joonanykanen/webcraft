@@ -974,6 +974,9 @@ body.mouse-captured * {
   position: absolute;
   left: 16px;
   bottom: 96px;
+  // UI-6: the goal card tucks itself away instead of covering the world forever (UI-6). It fades
+  // rather than vanishing, so it reads as "stepped aside" and not as "the HUD broke".
+  transition: opacity 0.45s ease, transform 0.45s ease;
   display: flex;
   align-items: center;
   gap: 10px;
@@ -984,6 +987,10 @@ body.mouse-captured * {
   border: 1px solid rgba(255, 255, 255, 0.14);
   box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
   pointer-events: none;
+}
+#milestone-tracker.faded {
+  opacity: 0;
+  transform: translateY(10px);
 }
 #milestone-tracker .milestone-icon {
   width: 32px;

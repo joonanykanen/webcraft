@@ -33,7 +33,7 @@
 
         <div id="hotbar" role="toolbar" aria-label="Hotbar"></div>
 
-        <!-- UI-6: the next milestone, always visible while playing -->
+        <!-- UI-6: the next milestone — fades out on its own, Tab pins it (see Hud.focusMilestones) -->
         <div id="milestone-tracker" class="hidden">
           <canvas class="milestone-icon" width="32" height="32"></canvas>
           <div>
@@ -155,6 +155,7 @@
                 <li><kbd>Space</kbd>/<kbd>Shift</kbd> Fly up/down</li>
                 <li><kbd>E</kbd> Inventory &amp; crafting</li>
                 <li><kbd>Esc</kbd> Pause &mdash; <kbd>Esc</kbd> again (or Resume) to play on</li>
+                <li><kbd>Tab</kbd> Keep the goal card on screen (press again to let it fade out)</li>
                 <li><kbd>Click</kbd> Grab the mouse for look; menus and dialogs always get it back</li>
                 <li>Look runs out of screen? It cannot &mdash; the cursor is locked to the window. Turn it off in Settings if you prefer a free cursor.</li>
               </ul>
@@ -180,7 +181,7 @@
                 <li>Better tools mine faster; some ores need a better pickaxe.</li>
                 <li>Watch hearts &amp; hunger. Apples drop from leaves.</li>
                 <li>Hostile mobs appear in the dark at night — light up your base.</li>
-                <li>The next goal sits above the hotbar; <em>Milestones</em> lists the whole chain.</li>
+                <li>The next goal appears beside the hotbar for a few seconds, and again whenever it changes, a milestone unlocks or a panel closes; <kbd>Tab</kbd> pins it. <em>Milestones</em> lists the whole chain.</li>
                 <li>Autosave runs every 30 s; the world survives a refresh.</li>
               </ul>
             </div>

@@ -111,6 +111,10 @@ export class Renderer implements MeshSink {
     this.atlas.magFilter = THREE.NearestFilter; // RD-3 crisp pixels
     this.atlas.minFilter = THREE.NearestFilter;
     this.atlas.generateMipmaps = false;
+    // Keep the atlas un-flipped. The block shader picks a tile as `tilePos = (aTile % 8, floor(aTile / 8))`,
+    // i.e. a row counted down the canvas from the top, so a whole-texture flip would resolve every tile
+    // to its mirrored row (I tried: magenta checkerboard). The vertical direction is corrected *inside*
+    // the tile instead — see the `1.0 - aUV.y` line in CHUNK_VERT.
     this.atlas.flipY = false;
     this.atlas.colorSpace = THREE.SRGBColorSpace;
     this.atlas.needsUpdate = true;

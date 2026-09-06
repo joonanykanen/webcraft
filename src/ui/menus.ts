@@ -1,5 +1,6 @@
 /** Menus, world list, settings, pause/death panels, milestone panel & touch controls (MM-1 … MM-5, UI-4, UI-6). */
-import { clamp } from '../core/constants.js';
+import { LOOK_PER_PIXEL, clamp } from '../core/constants.js';
+import { clampStep } from '../game/input.js';
 import { DEFAULT_SETTINGS, type Settings, type WorldRecord } from '../core/types.js';
 import { seedFromString } from '../core/rng.js';
 import type { LoadResult } from '../save/idb.js';
@@ -553,20 +554,43 @@ export class Menus {
     this.stick.addEventListener('pointerup', end);
     this.stick.addEventListener('pointercancel', end);
 
-    // drag anywhere on the viewport to look around
+    /*
+     * Drag anywhere on the viewport to look around — touch only.
+     *
+     * This handler is the reason the game felt like "the mouse sensitivity goes up while I hold the
+     * left button". Pointer events fire for the mouse as well as for fingers, and `touch.enabled` is
+     * true whenever touch controls are on (a setting, and auto-on for any device reporting
+     * `maxTouchPoints > 0`). So with a mouse the same movement was being integrated twice: once by
+     * `Input` from `movementX/Y`, and again here from `clientX/Y` — at ~286 degrees per pixel,
+     * because raw pixels were multiplied by 5 and handed over as radians. One pointer, two look
+     * sources, one very fast camera.
+     *
+     * Rules now: only a genuine touch pointer may start a drag, and the moment the world has the
+     * cursor (pointer lock) the drag path is disabled outright, since `Input` owns the look then.
+     */
     const view = el<HTMLCanvasElement>('viewport');
     let look: { x: number; y: number } | null = null;
+    const touchDragAllowed = (e: PointerEvent): boolean =>
+      e.pointerType === 'touch' && !!this.game && !this.game.input.usingLock;
     view.addEventListener('pointerdown', (e) => {
-      if (!this.game?.input.touch.enabled) return;
+      if (!this.game?.input.touch.enabled || !touchDragAllowed(e)) return;
       look = { x: e.clientX, y: e.clientY };
     });
     view.addEventListener('pointermove', (e) => {
       const g = this.game;
-      if (!g || !g.input.touch.enabled || !look) return;
-      g.input.addLook((e.clientX - look.x) * 5, (e.clientY - look.y) * 5);
+      if (!g || !g.input.touch.enabled || !look || !touchDragAllowed(e)) {
+        look = null;
+        return;
+      }
+      // Same scale as the mouse path, so the sensitivity slider means the same thing everywhere.
+      const step = LOOK_PER_PIXEL * g.input.sensitivity;
+      g.input.addLook(clampStep((e.clientX - look.x) * step), clampStep((e.clientY - look.y) * step), 'touchDrag');
       look = { x: e.clientX, y: e.clientY };
     });
     view.addEventListener('pointerup', () => {
+      look = null;
+    });
+    view.addEventListener('pointercancel', () => {
       look = null;
     });
   }

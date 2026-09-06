@@ -3,6 +3,15 @@ import { LOCK_SETTLE_MS, LOOK_PER_PIXEL, MAX_CLIENT_JUMP, MAX_LOOK_PER_EVENT } f
 
 export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
 
+/**
+ * Every place that can rotate the camera. `consumeLook()` reports how much each contributed since
+ * the last read, because the "sensitivity rises while I hold the mouse button" bug was two look
+ * sources adding up — and with no accounting there was no way to see which one was lying.
+ */
+export type LookSource = 'mouse' | 'touchDrag' | 'gamepad' | 'ui';
+export type LookMix = Record<LookSource, number>;
+export const emptyLookMix = (): LookMix => ({ mouse: 0, touchDrag: 0, gamepad: 0, ui: 0 });
+
 const GAME_KEYS = new Set([
   'KeyW',
   'KeyA',
@@ -79,6 +88,12 @@ export class Input {
   wheel = 0;
   lookDX = 0;
   lookDY = 0;
+  private lookBySource: LookMix = emptyLookMix();
+  /** How many mousemove events have actually reached the handler — divides into the look total to
+   * give rad/px, which is the number that exposes double-counted input (see the F3 `look` line). */
+  movesSeen = 0;
+  /** Accumulated mouse-derived look in radians (|dx| + |dy|), for rad/px above and the F3 line. */
+  sessionLookFromMouse = 0;
   /** True while we hand the cursor back on purpose (a panel opened) — the app must not pause. */
   expectUnlock = false;
   /** Timestamp of the last Space press so a tap shorter than one tick still jumps. */
@@ -252,12 +267,15 @@ export class Input {
     this.lastX = e.clientX;
     this.lastY = e.clientY;
     this.hasLast = true;
+    this.movesSeen++;
     // Pointer lock re-centres the cursor on grant; that warp arrives as one enormous delta.
     if (this.usingLock && performance.now() - this.lockSettledAt < LOCK_SETTLE_MS) return;
     // One gigantic delta (refocussed tab, a drag resumed far away) must never spin the camera.
     const step = LOOK_PER_PIXEL * this.sensitivity;
-    this.lookDX += clampStep(dx * step);
-    this.lookDY += clampStep(dy * step) * (this.invertY ? -1 : 1);
+    const lx = clampStep(dx * step);
+    const ly = clampStep(dy * step) * (this.invertY ? -1 : 1);
+    this.sessionLookFromMouse += Math.abs(lx) + Math.abs(ly);
+    this.addLook(lx, ly, 'mouse');
   };
 
   private wheelHandler = (e: WheelEvent) => {
@@ -347,6 +365,12 @@ export class Input {
   }
 
   /** Settings: switch between Pointer Lock and the cursor-hidden fallback. */
+  /** Radians of mouse-derived look per mousemove event seen, over the whole session. A number that
+   * drifts up with a button held (or doubles after reloading a world) means two look sources. */
+  radPerMove(): number {
+    return this.movesSeen > 0 ? this.sessionLookFromMouse / this.movesSeen : 0;
+  }
+
   setLockMouse(on: boolean): void {
     if (this.lockMouse === on) return;
     this.lockMouse = on;
@@ -407,15 +431,23 @@ export class Input {
   }
 
   /** Feed synthetic look deltas (touch drag-to-look, UI-4). */
-  addLook(dx: number, dy: number): void {
+  addLook(dx: number, dy: number, from: LookSource = 'ui'): void {
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
     this.lookDX += dx;
     this.lookDY += dy;
+    this.lookBySource[from] += Math.abs(dx) + Math.abs(dy);
   }
 
-  consumeLook(): { dx: number; dy: number } {
-    const out = { dx: this.lookDX, dy: this.lookDY };
+  /** Radians per source accumulated since the last `consumeLook()`. */
+  lookMix(): LookMix {
+    return { ...this.lookBySource };
+  }
+
+  consumeLook(): { dx: number; dy: number; sources: LookMix } {
+    const out = { dx: this.lookDX, dy: this.lookDY, sources: this.lookBySource };
     this.lookDX = 0;
     this.lookDY = 0;
+    this.lookBySource = emptyLookMix();
     return out;
   }
 

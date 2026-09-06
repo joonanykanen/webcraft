@@ -382,6 +382,63 @@ async function main() {
       return `Δyaw=${turned.toFixed(3)} Δpitch=${pitched.toFixed(3)} (${(Math.abs(turned) / 108).toFixed(4)} rad/px, ${pointerMode})`;
     });
 
+    // Regression for "the mouse gets faster while I hold the left button": the viewport drag-to-look
+    // handler (touch UI) used to run for mouse pointers too, and it started on pointerdown — i.e. on
+    // the mining click — adding a second, much larger look input. Gain must be identical either way,
+    // and a mouse pointer must contribute nothing to the touchDrag source.
+    await step('look gain is identical free vs LMB held, with touch controls on (BI-1)', async () => {
+      const gain = async (hold) =>
+        page.evaluate(
+          async (held) => {
+            const g = window.webcraft.game;
+            const cv = document.getElementById('viewport');
+            g.input.touch.enabled = true; // the configuration that used to break
+            g.player.yaw = 0;
+            g.player.pitch = 0;
+            await new Promise((r) => setTimeout(r, 400)); // outlast the lock settle window
+            const yaw0 = g.player.yaw;
+            const t0 = g.lookTotals().touchDrag;
+            const send = (type, init) => {
+              const E = type.startsWith('pointer') ? PointerEvent : MouseEvent;
+              const target = type === 'mousemove' ? window : cv;
+              target.dispatchEvent(new E(type, { bubbles: true, cancelable: true, view: window, button: 0, ...init }));
+            };
+            if (held) {
+              send('pointerdown', { pointerId: 1, pointerType: 'mouse', clientX: 400, clientY: 350, buttons: 1 });
+              send('mousedown', { clientX: 400, clientY: 350, button: 0, buttons: 1 });
+            }
+            let x = 400;
+            for (let i = 1; i <= 10; i++) {
+              const nx = 400 + 20 * i;
+              const d = nx - x;
+              x = nx;
+              send('pointermove', { pointerId: 1, pointerType: 'mouse', clientX: x, clientY: 350, movementX: d, buttons: held ? 1 : 0 });
+              send('mousemove', { clientX: x, clientY: 350, movementX: d, buttons: held ? 1 : 0 });
+              await new Promise((r) => requestAnimationFrame(r));
+            }
+            if (held) {
+              send('mouseup', { clientX: x, clientY: 350, button: 0 });
+              g.input.mining = false;
+            }
+            g.input.touch.enabled = false;
+            await new Promise((r) => setTimeout(r, 100));
+            return {
+              radPerPx: Math.abs(g.player.yaw - yaw0) / 200,
+              drag: g.lookTotals().touchDrag - t0,
+              moves: g.input.movesSeen,
+            };
+          },
+          hold,
+        );
+      const free = await gain(false);
+      const held = await gain(true);
+      if (free.radPerPx < 0.005) throw new Error(`free look gain collapsed (${free.radPerPx.toFixed(5)} rad/px)`);
+      const ratio = held.radPerPx / free.radPerPx;
+      if (ratio > 1.15) throw new Error(`look is ${ratio.toFixed(2)}x more sensitive while LMB is held (${free.radPerPx.toFixed(5)} → ${held.radPerPx.toFixed(5)} rad/px)`);
+      if (free.drag > 0 || held.drag > 0) throw new Error(`a mouse pointer fed the touch drag source: free=${free.drag} held=${held.drag} rad`);
+      return `free ${free.radPerPx.toFixed(5)} vs held ${held.radPerPx.toFixed(5)} rad/px (ratio ${ratio.toFixed(2)}), touchDrag 0`;
+    });
+
     const st = await page.evaluate(() => {
       const g = window.webcraft.game;
       return {
@@ -808,15 +865,13 @@ async function main() {
         const g = window.webcraft.game;
         const samples = [];
         for (const t of [0.44, 0.46, 0.48, 0.5, 0.52, 0.54, 0.56, 0.58, 0.6, 0.62, 0.66]) {
-          g.record.data.timeOfDay = t;
-          g.timeMs = 0;
+          g.setTimeOfDay(t);
           await new Promise((r) => setTimeout(r, 90));
           samples.push(+g.nightFactor().toFixed(3));
         }
         let maxStep = 0;
         for (let i = 1; i < samples.length; i++) maxStep = Math.max(maxStep, Math.abs(samples[i] - samples[i - 1]));
-        g.record.data.timeOfDay = 0.74;
-        g.timeMs = 0;
+        g.setTimeOfDay(0.74);
         return { samples, maxStep, paused: g.screen };
       });
       // one sample = 12 in-game seconds; a snap would show up as a single >0.3 step
@@ -828,6 +883,156 @@ async function main() {
     });
 
     // ------------------------------------------------------------ pause, save, quit, reload
+    // RD-3 / atlas regression: the block shader maps aUV.y = 1 (the top vertex of a face) into the tile,
+    // and if that mapping is not mirrored the art lands vertically flipped — grass fringe along the
+    // bottom of the dirt, flame at the base of a torch. No unit test can see this, so read the pixels.
+    await step('asymmetric tiles are drawn the right way up on block faces (RD-3)', async () => {
+      const r = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const B = window.webcraft.BlockId;
+        const W_ = g.world;
+        g.input.release();
+        // Everything this step touches is put back afterwards: it runs in the middle of a tour whose
+        // later steps look at the same sky.
+        const undo = [];
+        const keep = (x, y, z) => undo.push([x, y, z, W_.getBlock(x, y, z)]);
+        const savedTime = g.timeOfDay;
+        const home = { x: g.player.pos.x, y: g.player.pos.y, z: g.player.pos.z, yaw: g.player.yaw, pitch: g.player.pitch };
+        g.setTimeOfDay(0.25); // noon, so the face is lit and its hues are readable
+        g.player.yaw = 0;
+        g.player.pitch = 0;
+
+        // Stand on the highest solid ground near the player and build the test block in open sky.
+        const px = Math.round(g.player.pos.x), pz = Math.round(g.player.pos.z);
+        let sy = 1;
+        for (let y = 126; y > 0; y--) {
+          const b = W_.getBlock(px, y, pz);
+          if (b !== B.AIR && b !== B.WATER) { sy = y; break; }
+        }
+        g.player.pos.x = px + 0.5;
+        g.player.pos.z = pz + 4.5;
+        g.player.pos.y = sy + 1;
+        g.player.vel.x = 0; g.player.vel.y = 0; g.player.vel.z = 0;
+        // The player is at pz + 4.5 looking down -Z, so the block goes three blocks in front of them.
+        const bx = px, tz = pz + 1;
+        for (let dy = 1; dy <= 4; dy++) { keep(bx, sy + dy, tz); W_.setBlock(bx, sy + dy, tz, B.AIR); }
+        for (const dx of [-1, 1]) { keep(bx + dx, sy + 1, tz); W_.setBlock(bx + dx, sy + 1, tz, B.AIR); }
+        keep(bx, sy + 1, tz);
+        W_.setBlock(bx, sy + 1, tz, B.GRASS);
+
+        const raf = (n) => new Promise((res) => { let k = 0; const t = () => (++k >= n ? res() : requestAnimationFrame(t)); requestAnimationFrame(t); });
+        // Let the player settle, the light spread and the mesh queue drain before sampling: sampling a
+        // face that has not been meshed yet would read whatever terrain happens to be behind it.
+        await raf(30);
+        for (let i = 0; i < 40; i++) {
+          const s0 = W_.stats;
+          if (s0.dirty === 0 && s0.genQueue === 0) break;
+          await raf(10);
+        }
+        await raf(20);
+
+        const cam = g.renderer.camera;
+        const V = cam.position.constructor;
+        const gl = g.renderer.three.getContext();
+        const WW = gl.drawingBufferWidth, HH = gl.drawingBufferHeight;
+        const toPixel = (wx, wy, wz) => {
+          const v = new V(wx, wy, wz).project(cam);
+          return { x: (v.x * 0.5 + 0.5) * WW, yGl: (v.y * 0.5 + 0.5) * HH };
+        };
+        const FZ = tz + 0.5; // the face the player sees
+        const left = toPixel(bx + 0.04, sy + 1.5, FZ);
+        const right = toPixel(bx + 0.96, sy + 1.5, FZ);
+        const top = toPixel(bx + 0.5, sy + 1.95, FZ);
+        const bot = toPixel(bx + 0.5, sy + 1.05, FZ);
+        const yLo = Math.round(Math.min(top.yGl, bot.yGl));
+        const yHi = Math.round(Math.max(top.yGl, bot.yGl));
+        const n = yHi - yLo + 1;
+        const x0 = Math.min(left.x, right.x), span = Math.abs(right.x - left.x);
+        const columns = [];
+        for (const f of [0.15, 0.32, 0.5, 0.68, 0.85]) {
+          const buf = new Uint8Array(4 * n);
+          gl.readPixels(Math.round(x0 + span * f), yLo, 1, n, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+          const rows = [];
+          for (let i = 0; i < n; i++) {
+            const rr = buf[i * 4], gg = buf[i * 4 + 1], bb = buf[i * 4 + 2];
+            // i = 0 is the lowest GL row; unshift so index 0 is the top of the face
+            rows.unshift({
+              green: gg > rr + 5 && gg > bb + 3,
+              brown: rr > gg + 6 && rr > bb + 6,
+              rgb: `${rr},${gg},${bb}`,
+            });
+          }
+          const share = (list, pred) => (list.length ? list.filter(pred).length / list.length : 0);
+          const q = Math.max(2, Math.floor(n * 0.3));
+          const half = Math.floor(n / 2);
+          columns.push({
+            x: Math.round(x0 + span * f),
+            topGreen: share(rows.slice(0, q), (p) => p.green),
+            bottomGreen: share(rows.slice(half), (p) => p.green),
+            bottomBrown: share(rows.slice(half), (p) => p.brown),
+            anyGreen: rows.some((p) => p.green),
+            anyBrown: rows.some((p) => p.brown),
+            sample: rows.filter((_, k) => k % Math.max(1, Math.floor(n / 8)) === 0).map((p) => p.rgb).join(' '),
+          });
+        }
+
+        // ---- put the world back exactly as it was ----
+        W_.setBlock(bx, sy + 1, tz, B.AIR);
+        for (let i = undo.length - 1; i >= 0; i--) {
+          const [x, y, z, id] = undo[i];
+          W_.setBlock(x, y, z, id);
+        }
+        g.player.pos.x = home.x; g.player.pos.y = home.y; g.player.pos.z = home.z;
+        g.player.yaw = home.yaw; g.player.pitch = home.pitch;
+        g.player.vel.x = 0; g.player.vel.y = 0; g.player.vel.z = 0;
+        const light = W_.getLight(bx, sy + 1, tz);
+        g.setTimeOfDay(savedTime);
+        await raf(20);
+        return { n, columns, light: light ? Math.max(light.sky, light.blk) : -1 };
+      });
+      const dump = r.columns.map((c) => `x${c.x}[${c.sample}]`).join(' || ');
+      const visible = r.columns.filter((c) => c.anyGreen && c.anyBrown);
+      if (r.n < 20) throw new Error(`the grass face covered only ${r.n} rows — cannot judge orientation (${dump})`);
+      if (visible.length < 3)
+        throw new Error(`the test block was not on screen (only ${visible.length}/5 columns showed both grass and dirt; face ${r.n}px, light was ${r.light ?? '?'}; ${dump})`);
+      const med = (key) => visible.map((c) => c[key]).sort((a, b) => a - b)[Math.floor(visible.length / 2)];
+      const topGreen = med('topGreen');
+      const bottomGreen = med('bottomGreen');
+      const bottomBrown = med('bottomBrown');
+      if (topGreen < 0.55) throw new Error(`grass fringe is not at the top of the face: median top 25% is ${(topGreen * 100).toFixed(0)}% green (${dump})`);
+      if (bottomGreen > 0.3) throw new Error(`grass fringe bleeds down the face: median bottom half is ${(bottomGreen * 100).toFixed(0)}% green (${dump})`);
+      if (bottomBrown < 0.45) throw new Error(`lower grass face is not dirt: median bottom half is ${(bottomBrown * 100).toFixed(0)}% brown (${dump})`);
+      return `face ${r.n}px × 5 columns: top 25% ${topGreen.toFixed(2)} green, bottom half ${bottomGreen.toFixed(2)} green / ${bottomBrown.toFixed(2)} dirt (world restored after)`;
+    });
+
+    // RD-5 regression: the clock's origin used to be read live from the save record, and saving wrote
+    // the current time into that record. Every autosave (30 s) then moved the origin to now while the
+    // elapsed term kept growing — the sky jumped forward by the whole session, which is what the
+    // "evening suddenly leaps a quarter of the way into the night" report was.
+    await step('saving the world does not jump the clock (RD-5)', async () => {
+      const r = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        g.setTimeOfDay(0.46); // early evening, where the complaint was noticed
+        // Age the session the way real play does. `clock` is private in TS but this is exactly the
+        // state ("playing for 5 minutes") that a harness must be able to set up to prove the point.
+        g.clock.advance(5 * 60 * 1000);
+        await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+        const before = g.timeOfDay;
+        await g.save(true); // manual save: writes timeOfDay into the record, exactly like autosave
+        const after = g.timeOfDay;
+        g.clock.advance(1000);
+        await new Promise((res) => requestAnimationFrame(() => requestAnimationFrame(res)));
+        return { before, after, later: g.timeOfDay, jump: Math.abs(after - before) };
+      });
+      if (r.jump > 0.002) {
+        throw new Error(`saving jumped the clock by ${r.jump.toFixed(4)} of a cycle (${(r.jump * 600).toFixed(0)} s of sky)`);
+      }
+      const expected = 1000 / 600000;
+      const moved = (((r.later - r.after) % 1) + 1) % 1;
+      if (moved > expected * 8) throw new Error(`a second of play moved the clock by ${moved.toFixed(5)} (expected ${expected.toFixed(5)})`);
+      return `save moved t by ${r.jump.toExponential(1)}; 1 s of play = ${moved.toFixed(5)} of a cycle`;
+    });
+
     // The simulation curve above is not what the player sees; this measures the *pixels*, which is
     // the only way to catch a sky that changes gradually in the model but snaps on screen.
     await step('the rendered sky brightens gradually all the way round (RD-5)', async () => {
@@ -844,16 +1049,14 @@ async function main() {
         const out = [];
         for (let i = 0; i <= 24; i++) {
           const t = i / 24;
-          g.record.data.timeOfDay = t;
-          g.timeMs = 0;
+          g.setTimeOfDay(t);
           await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
           gl.readPixels(Math.floor(cv.width / 2 - w / 2), Math.floor(cv.height * 0.62), w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
           let sum = 0;
           for (let p = 0; p < px.length; p += 4) sum += (px[p] + px[p + 1] + px[p + 2]) / 3;
           out.push(sum / (px.length / 4));
         }
-        g.record.data.timeOfDay = 0.25;
-        g.timeMs = 0;
+        g.setTimeOfDay(0.25);
         return out;
       });
       const min = Math.min(...lums);
@@ -1063,6 +1266,80 @@ async function main() {
       check('moving a slider updates the live game', applied.after <= applied.before, JSON.stringify(applied));
       await page.screenshot({ path: join(SHOTS, '07-settings.png') });
       return `${fields.ranges} sliders, ${fields.toggles} toggles`;
+    });
+
+    // UI-6 regression: the goal card used to be permanently bolted to the bottom-left, over the world.
+    // It must step aside by itself, and come back when it is actually relevant.
+    // UI-6 regression: the goal card used to be bolted to the bottom-left for the whole session, over
+    // the world. It must step aside on its own and come back only when it is relevant (new goal,
+    // achievement, just closed a panel, or the player asked for it with Tab).
+    await step('the goal card steps aside and returns when relevant (UI-6)', async () => {
+      const card = () =>
+        page.evaluate(() => {
+          const t = document.getElementById('milestone-tracker');
+          return {
+            hidden: t.classList.contains('hidden'),
+            faded: t.classList.contains('faded'),
+            opacity: Number(getComputedStyle(t).opacity),
+            screen: window.webcraft?.game?.screen,
+          };
+        });
+      const panelOpen = `(() => !!document.querySelector('#panel-inventory.active'))()`;
+      const inPlay = `(() => window.webcraft?.game?.screen === 'none')()`;
+      const stages = {};
+      const stage = async (name, fn) => {
+        try {
+          const v = await fn();
+          stages[name] = v === undefined ? 'ok' : v;
+          return v;
+        } catch (e) {
+          const where = await page.evaluate(() => ({
+            screen: window.webcraft?.game?.screen,
+            panel: !!document.querySelector('#panel-inventory.active'),
+            active: [...document.querySelectorAll('.active')].map((n) => n.id).join(','),
+            card: (() => { const t = document.getElementById('milestone-tracker'); return { faded: t.classList.contains('faded'), opacity: getComputedStyle(t).opacity }; })(),
+          })).catch(() => ({}));
+          throw new Error(`at stage '${name}' (${JSON.stringify(stages)}, state ${JSON.stringify(where)}): ${e?.message ?? e}`);
+        }
+      };
+      // Drive the game into the play state directly: whatever the previous step left open is not this
+      // step's business.
+      await stage('ensure-play', async () => {
+        await page.evaluate(() => window.webcraft.game.setScreen('none'));
+        await page.waitForFunction(inPlay, null, { timeout: 8000 });
+        await page.mouse.click(500, 300); // click back in, the way a player would
+      });
+      await page.waitForTimeout(400);
+      stages.onResume = await card();
+      if (stages.onResume.faded) throw new Error('no goal card after resuming — the player cannot see what to work towards');
+      await page.waitForTimeout(14000);
+      stages.idle = await card();
+      if (!stages.idle.faded || stages.idle.opacity > 0.05)
+        throw new Error(`the card never stepped aside (faded=${stages.idle.faded}, opacity=${stages.idle.opacity})`);
+      await stage('open-inventory', async () => {
+        await page.keyboard.press('KeyE');
+        await page.waitForFunction(panelOpen, null, { timeout: 5000 });
+      });
+      await stage('close-inventory', async () => {
+        await page.keyboard.press('KeyE');
+        await page.waitForFunction(`(() => !document.querySelector('#panel-inventory.active'))()`, null, { timeout: 5000 });
+        await page.waitForFunction(inPlay, null, { timeout: 5000 });
+      });
+      await page.waitForTimeout(600);
+      stages.afterPanel = await card();
+      if (stages.afterPanel.faded) throw new Error('closing the inventory did not bring the goal card back');
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(600);
+      if (await page.evaluate(() => document.getElementById('milestone-tracker').classList.contains('faded')))
+        throw new Error('Tab did not pin the goal card');
+      await page.waitForTimeout(4000); // well past the 4 s it may linger once unpinned
+      if (await page.evaluate(() => document.getElementById('milestone-tracker').classList.contains('faded')))
+        throw new Error('a pinned goal card faded out anyway');
+      await page.keyboard.press('Tab');
+      await page.waitForTimeout(5200);
+      stages.afterUnpin = await card();
+      if (!stages.afterUnpin.faded) throw new Error('Tab did not hand the goal card back to the fade');
+      return 'up on resume → gone after 14 s → back after a panel → pinned by Tab → faded again';
     });
 
     // ------------------------------------------------------------ console hygiene

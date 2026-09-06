@@ -78,6 +78,9 @@ export const MAX_FOOD = 10;
 export const MAX_AIR = 10;
 export const MAX_WORLD_SLOTS = 10; // SV-2 (min 5)
 export const AUTOSAVE_MS = 30_000; // SV-1
+/** How long the "next goal" card stays on screen before tucking itself away (UI-6). It comes back
+ * when the goal changes, when a milestone unlocks, while a panel is open, and on Tab. */
+export const MILESTONE_FOCUS_MS = 12_000;
 export const SCHEMA_VERSION = 1;
 
 // ---- budgets (§8.3) ----

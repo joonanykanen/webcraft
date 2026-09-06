@@ -6,7 +6,6 @@ import {
   AUTOSAVE_MS,
   CHUNK_SX,
   CHUNK_SZ,
-  DAY_LENGTH_MS,
   JUMP_BUFFER_S,
   MAX_AIR,
   MAX_STACK,
@@ -19,7 +18,7 @@ import {
   chunkKey,
   clamp,
 } from '../core/constants.js';
-import { dayNightCurve } from '../core/daynight.js';
+import { DayClock, dayNightCurve } from '../core/daynight.js';
 import { BIOME_NAMES, type GameMode, type SaveData, type Settings, type Slot, type Vec3, type WorldRecord } from '../core/types.js';
 import { mulberry32 } from '../core/rng.js';
 import type { AudioBus } from '../audio/audio.js';
@@ -35,7 +34,7 @@ import { raycast, type RayHit } from '../world/raycast.js';
 import { findSpawn } from '../world/worldgen.js';
 import { EntityManager, explode, settleGravity, type EntityHost } from './entities.js';
 import { Milestones, type MilestoneView } from './achievements.js';
-import { Input } from './input.js';
+import { emptyLookMix, type LookMix, type LookSource, Input } from './input.js';
 import { Inventory } from './inventory.js';
 import { MobManager, type Mob, type MobKind } from './mobs.js';
 import { boxIntersectsCell, breakTime, canPlaceAt, dropFor, heldBlockId } from './mining.js';
@@ -81,6 +80,8 @@ export interface HudModel {
   onGround: boolean;
   reach: number | null;
   targetBlock: number;
+  /** Look radians applied in the last frame, per source (F3: shows double-counting directly). */
+  look: string;
   ready: number;
   seed: number;
   webgl2: boolean;
@@ -137,7 +138,8 @@ export class Game implements EntityHost {
   screen: Screen = 'none';
   timeOfDay: number;
   readonly freshWorld: boolean;
-  private timeMs = 0;
+  /** The world clock. Never derived from the save record — see DayClock's doc comment. */
+  private readonly clock = new DayClock(0.25);
   private target: RayHit | null = null;
   private mobTarget: Mob | null = null;
   private mineProgress = 0;
@@ -177,7 +179,8 @@ export class Game implements EntityHost {
     this.freshWorld = opts.freshWorld;
     this.seed = opts.record.seed >>> 0;
     this.mode = opts.record.mode;
-    this.timeOfDay = opts.record.data.timeOfDay ?? 0.2;
+    this.clock.pin(opts.record.data.timeOfDay ?? 0.2);
+    this.timeOfDay = this.clock.t;
     this.stats = { ...opts.record.data.stats };
 
     this.renderer = new Renderer(opts.canvas, opts.settings, opts.webgl2);
@@ -365,6 +368,10 @@ export class Game implements EntityHost {
     if (!this.paused && this.screen === 'none') {
       const look = this.input.consumeLook();
       if (look.dx !== 0 || look.dy !== 0) this.player.look(look.dx, look.dy);
+      this.lastLookMix = look.sources;
+      (Object.keys(look.sources) as LookSource[]).forEach((k) => {
+        this.sessionLookMix[k] += look.sources[k];
+      });
     } else {
       this.input.consumeLook(); // panel owns the mouse: drop stale deltas
     }
@@ -384,8 +391,7 @@ export class Game implements EntityHost {
 
     // ---- time of day (RD-5) ----
     if (!this.paused) {
-      this.timeMs += frameDt * 1000;
-      this.timeOfDay = (this.baseTime + this.timeMs / DAY_LENGTH_MS) % 1;
+      this.timeOfDay = this.clock.advance(frameDt * 1000);
     }
     const lightInfo = this.renderer.setTimeOfDay(this.timeOfDay);
 
@@ -474,8 +480,15 @@ export class Game implements EntityHost {
     this.lastTickMs = performance.now() - t0;
   }
 
-  private get baseTime(): number {
-    return this.record.data.timeOfDay ?? 0.2;
+  /**
+   * Pin the world clock (tests, and anything wanting a specific moment). Deliberately the only way to
+   * set it: the clock's origin is private, so no code path — saving above all — can move the time
+   * sideways and make the sky jump.
+   */
+  setTimeOfDay(t: number): void {
+    this.clock.pin(t);
+    this.timeOfDay = this.clock.t;
+    this.renderer.setTimeOfDay(this.timeOfDay);
   }
 
   /** Night weight for spawning/burning — the renderer's own curve, so light and behaviour agree. */
@@ -484,6 +497,33 @@ export class Game implements EntityHost {
   }
 
   // ------------------------------------------------------------ keys
+  /** Look radians per source in the last consumed frame (F3; also how the look-gain probes read). */
+  lastLookMix: LookMix = emptyLookMix();
+  private sessionLookMix: LookMix = emptyLookMix();
+
+  /** One F3 line that answers "where did that rotation come from?" — see Input.addLook(). */
+  private describeLookMix(): string {
+    const m = this.lastLookMix;
+    const t = m.mouse + m.touchDrag + m.gamepad + m.ui;
+    const s = this.sessionLookMix;
+    // Per *event*, not per pixel: an event can carry any number of pixels. What makes this line worth
+    // reading is the ratio between sources — `drag` must stay 0 under a mouse, and a doubled look input
+    // would show up as the mouse total jumping relative to how much the cursor actually moved.
+    const totals =
+      `mouse ${this.input.movesSeen} moves · ${s.mouse.toFixed(1)} rad (${this.input.radPerMove().toFixed(2)}/move)` +
+      ` · drag ${s.touchDrag.toFixed(1)} rad`;
+    if (t < 1e-6) return `idle · ${totals}`;
+    const parts = [`mouse ${m.mouse.toFixed(3)}`];
+    if (m.touchDrag) parts.push(`touchDrag ${m.touchDrag.toFixed(3)}`);
+    if (m.gamepad) parts.push(`gamepad ${m.gamepad.toFixed(3)}`);
+    if (m.ui) parts.push(`ui ${m.ui.toFixed(3)}`);
+    return `${parts.join(' + ')} · ${totals}`;
+  }
+
+  /** Total radians applied per source over the whole session — cumulative proof of double input. */
+  lookTotals(): LookMix {
+    return { ...this.sessionLookMix };
+  }
   /** Set when losing the mouse caused a pause (see the onLockChange wiring in the constructor). */
   private lockPauseAt = -1e9;
 
@@ -916,6 +956,7 @@ export class Game implements EntityHost {
       onGround: this.player.onGround,
       reach: this.target ? this.target.dist : null,
       targetBlock: this.target ? this.target.block : 0,
+      look: this.describeLookMix(),
       ready: this.readyProgress(),
       seed: this.seed,
       webgl2: info.webgl2,

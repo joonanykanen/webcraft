@@ -74,8 +74,14 @@ describe('input (PH-1 capture without the Pointer Lock API)', () => {
   it('consumeLook drains the accumulator', () => {
     const input = new Input();
     input.addLook(0.1, 0.05);
-    expect(input.consumeLook()).toEqual({ dx: 0.1, dy: 0.05 });
-    expect(input.consumeLook()).toEqual({ dx: 0, dy: 0 });
+    const drained = input.consumeLook();
+    expect({ dx: drained.dx, dy: drained.dy }).toEqual({ dx: 0.1, dy: 0.05 });
+    // and the per-source accounting saw it as UI input, twice
+    expect(drained.sources.ui).toBeCloseTo(0.15, 5);
+    expect(drained.sources.mouse).toBe(0);
+    expect(input.consumeLook().sources.ui).toBe(0);
+    const empty = input.consumeLook();
+    expect({ dx: empty.dx, dy: empty.dy }).toEqual({ dx: 0, dy: 0 });
   });
 });
 

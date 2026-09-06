@@ -35,8 +35,9 @@ npm run preview
 | `E` | Inventory + crafting (2×2 by hand, 3×3 next to a crafting table) |
 | `Q` | Drop the selected stack |
 | `Esc` | Pause — one press. Press again to resume. Closes panels back to the screen they came from |
-| `Esc` → *Milestones* | Progression chain (21 goals, from the first log to a pickaxe of gems). The next goal also sits above the hotbar |
-| `F3` | Debug overlay (FPS, chunk/mesh stats, light, target, stats) |
+| `Esc` → *Milestones* | Progression chain (21 goals, from the first log to a pickaxe of gems) |
+| `Tab` | Pin the next-goal card so it stops fading out; press again to let it fade. It appears on its own when a goal changes, a milestone unlocks, or a panel closes |
+| `F3` | Debug overlay (FPS, chunk/mesh stats, light, target, look input sources, stats) |
 | `F` | Toggle the held-item view model |
 | `R` | Return to the spawn point (creative) |
 
@@ -172,7 +173,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 200 vitest tests (13 files, ~11 s, Node environment)
+npm run test         # 207 vitest tests (14 files, ~12 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -193,7 +194,8 @@ npm run verify       # everything
 | `tests/input.test.ts` | capture with and without pointer lock, Escape always reaches the app, menu ownership clears held keys, look only while the world owns the mouse, identical look with/without LMB held, per-event clamp + NaN rejection + implausible coordinate jumps, sprint aliases (Ctrl, Alt, Caps Lock, double-tap W), jump buffering + stale-tap expiry, touch merge, wheel |
 | `tests/milestones.test.ts` | unlock from observed play, quantity counting, requirement gating + retroactive unlock, the whole 21-goal chain is completable, save/load round-trip with unknown ids dropped, `warmUp` stays silent during load, definition integrity (unique ids, declared-before-used requirements, non-empty goals) |
 | `tests/geometry.test.ts` | face/tile mapping incl. the dedicated front face, centred vs cell-aligned bounds, non-uniform scale, per-face tints, the entity V-flip (mob faces) and UV corners staying strictly inside the `fract()` range |
-| `tests/daynight.test.ts` | the shared day/night curve: day and night plateaux, a monotone twilight band, the brightest change happening *while the sun is at the horizon* and never exceeding 2 %/s, and agreement with `Game.nightFactor()` |
+| `tests/daynight.test.ts` | the shared day/night curve: day and night plateaux, a monotone twilight band, the brightest change happening *while the sun is at the horizon* and never exceeding 2 %/s, agreement with `Game.nightFactor()`, and the `DayClock`: exact rate, wrap, garbage frames ignored, and pinning to "the current time" being a no-op (the autosave jump) |
+| `tests/uv-orientation.test.ts` | the vertical UV convention: the highest vertex of every face and every hand-built cross quad (torch, plants) carries the largest `aUV.y`, and the shader mirrors inside the tile rather than flipping the atlas |
 
 ### Golden world hashes
 
@@ -207,7 +209,7 @@ new generation in chunks nobody touched).
 ### Browser smoke test
 
 ```
-npm run smoke     # vite preview + real Chrome (55 checks, ~2 min)
+npm run smoke     # vite preview + real Chrome (59 checks, ~2½ min)
 npm run verify    # check + smoke
 ```
 
@@ -277,6 +279,41 @@ probing something a screenshot raised — and all are now covered:
 * hearts and hunger sat on two rows with different baselines, so the HUD looked misaligned no matter
   how the widths lined up; they are one flex line now, and the smoke asserts the two rows share a
   top and bottom exactly and never overlap;
+* **every tile was drawn vertically mirrored on blocks** — the grass fringe grew from the bottom of
+  the dirt, a torch's flame sat at the base of the stick. The mesher gives `aUV.y = 1` to the top
+  vertex of each face (cross blocks included, measured from the emitted geometry), the atlas art is
+  painted top-down on a canvas, and the atlas was uploaded with `flipY = false` — so `v = 1` sampled
+  the *bottom* row of the tile. Setting `flipY = true` is the obvious fix and it is wrong: the shader
+  picks a tile as `(aTile % 8, floor(aTile / 8))`, a row counted down the canvas, so a whole-texture
+  flip resolves every tile to its mirrored row (photographed: a magenta checkerboard). The mirror now
+  happens inside the tile — `fv = (1.0 - aUV.y) * 0.9375 + 0.03125` — with the same 1/32 px inset that
+  keeps `fract()` tiling from bleeding. Covered from both ends: `tests/uv-orientation.test.ts` on the
+  geometry, and a smoke step that floats a grass block in open sky, projects its face to pixels and
+  requires the top of it green and the bottom dirt; the entity/mob path is separate and unaffected;
+* **the world clock jumped forward by the whole play session, once per autosave.** `timeOfDay` was
+  computed as `record.data.timeOfDay + timeMs / DAY_LENGTH_MS` — reading the origin *live from the save
+  record* — while `save()` writes the current `timeOfDay` into that record and `timeMs` keeps growing.
+  Every 30 s (`AUTOSAVE_MS`) the origin moved to now and the clock leapt by the elapsed session: after
+  five minutes that is half a cycle in one frame, which is exactly what "evening suddenly jumps a
+  quarter of the way into the night, same for late-night to morning" described. My earlier day/night
+  tests could not see it, because they *set* the time (i.e. they recreated the post-save state) instead
+  of letting the clock run. The origin is now a private field behind `DayClock.advance()/pin()`;
+  `Game.setTimeOfDay()` is the only way to move it, unit tests assert that pinning to the current time
+  is a no-op, and a smoke step ages the session five minutes, saves, and requires the jump to be under
+  0.2 % of a cycle;
+* **the mouse really did get more sensitive while the left button was held, and the earlier "pointer
+  lock" explanation was wrong.** `Menus.wireTouch()` installs a drag-to-look handler for touch screens;
+  it was gated only on `input.touch.enabled` (which a touch-screen laptop, or Settings → *Touch
+  controls*, turns on) and on `pointerdown` — i.e. it started on the mining click — and then integrated
+  `clientX/clientY` deltas multiplied by 5 *as radians* (~286°/px) on top of `Input`'s own
+  `movementX/movementY`. Measured with `scripts/probe-lookgain.mjs`: 0.0175 rad/px free, **0.0224 rad/px
+  with LMB held**, plus 1000 rad of phantom `drag` input in one 200 px swipe. It now requires
+  `pointerType === 'touch'`, refuses to run while pointer lock is held (a locked cursor has no
+  `clientX` to integrate), uses the same `LOOK_PER_PIXEL * sensitivity` scale as the mouse and clamps
+  per event; `Input` books every look contribution by source, `F3` shows `mouse … moves · rad · drag …
+  rad`, touch UI auto-enables only on a genuinely coarse pointer (`matchMedia('(pointer: coarse)')`),
+  and a smoke step asserts free-vs-held gain is identical with touch controls on and that a mouse
+  pointer never feeds the drag source;
 * `nightFactor()` (mob spawning/burning) used a different day/night ramp than the renderer's
   sky, so darkness snapped on while the sky still looked like sunset. Both read
   `core/daynight.ts` now, and the smoke test asserts the twilight band is gradual;
@@ -289,11 +326,19 @@ probing something a screenshot raised — and all are now covered:
   the fist is nearly as wide as a carried block and the grip overlaps the knuckles, so the skin stays
   in front of whatever is held. Held art is no longer skewed in 3D either: a 16 px sprite rotated in
   perspective staircases its own pixels (the pickaxe read as a broken zig-zag);
-* mob heads rendered upside-down (a pig's snout sat above its eyes): the atlas is painted upright
-  while the chunk face basis runs `v` downwards, so entity heads need `flipV` — unit-tested;
-* Escape needed double presses and the mouse felt "spiky" while mining — both came from Pointer
-  Lock. It is gone (see [Pointer capture](#pointer-capture)), and a single `mousemove` may never turn
-  the camera further than `MAX_LOOK_PER_EVENT`;
+* mob heads rendered upside-down (a pig's snout sat above its eyes): entity sprites are built as their
+  own `CanvasTexture`s (default `flipY = true`) while `voxelCubeGeometry` writes `v` downwards, so
+  entity faces need `flipV` — unit-tested. This is a separate pipeline from the chunk shader, which is
+  why re-mirroring the block tiles did not disturb mob faces;
+* Escape needed double presses and the mouse felt "spiky" when a refocus delivered one huge delta —
+  Pointer Lock is the primary path again (see [Mouse capture](#mouse-capture)), the cursor is
+  re-centred under it so a second monitor cannot spoil the deltas, a single `mousemove` may never turn
+  the camera further than `MAX_LOOK_PER_EVENT`, and movement inside `LOCK_SETTLE_MS` of the lock being
+  granted is discarded (that is the re-centring warp, not the player);
+* the next-goal card was bolted to the bottom-left for the entire session, covering the world. It now
+  fades after `MILESTONE_FOCUS_MS` and comes back only when it is worth reading: the goal changed, a
+  milestone unlocked, a panel closed (and picking up the 4th log of 12 is *not* a goal change), or the
+  player presses `Tab` to pin it. One rule, driven from `onScreen()`, so no path can leave it stuck on;
 * a non-finite `movementX` (the first event after a focus change) went straight into `Player.look`,
   making yaw/pitch NaN and therefore *every* coordinate NaN — an empty world. Input sanitises deltas
   and the player rejects non-finite look input.
@@ -307,13 +352,25 @@ sets `input.active` and the `mining`/`placing` flags directly, negative `player.
 loss and does not pause the world again. `document.pointerLockElement` is the truth about pointer
 lock, and `input.usingLock` mirrors it; `input.locked` is broader — lock *or* fallback.
 
+If the look ever feels wrong, `F3` answers it without a debugger: the `look` line prints how many
+`mousemove` events arrived, how many radians they produced (`rad/move` — per *event*, and an event can
+carry any number of pixels), and how much came from the touch drag source. The drag number must stay 0
+under a mouse. `scripts/probe-lookgain.mjs` is the same question turned into a matrix: it dispatches
+synthetic events with known pixel deltas and requires every cell — pointer lock or free cursor, touch
+controls on or off, button held or not — to agree on radians-per-pixel within 15 %.
+
 For anything the assertions cannot express — does the arm *look* right, is that pig's face upright,
 are the hearts really flush with the hotbar — there are small one-purpose probes that boot
 `vite preview`, drive the real page and write cropped PNGs into `smoke/` for a human to read:
 `probe-visual2.mjs` (capture, HUD, punch, look, Esc, milestone panel, mining), `probe-hand.mjs`
 (held empty hand / block / tool / food), `probe-faces.mjs` (mob faces held still), `probe-pips.mjs`
-(HUD geometry at two viewport sizes, including whether the two rows really share a baseline) and
-`probe-polish.mjs` (full-screen HUD, punch, unlock toast, pause). Run them after `npx vite build`
+(HUD geometry at two viewport sizes, including whether the two rows really share a baseline),
+`probe-orient.mjs` (a shelf of grass/log/torch/bench/furnace photographed close-up, to see whether
+asymmetric tiles land the right way up on block faces), `probe-goals.mjs` (the next-goal card's
+fade/return/pin cycle), `probe-polish.mjs` (full-screen HUD, punch, unlock toast, pause) and
+`probe-lookgain.mjs`, which dispatches synthetic pointer+mouse events with *known* pixel deltas and
+prints radians-per-pixel for every combination of pointer lock, free cursor, touch controls and
+left-button-held — the matrix that found the sensitivity bug below. Run them after `npx vite build`
 and open the images.
 
 `probe-aspect.mjs` is the one that runs in **two engines** — Chrome and Playwright's WebKit, i.e.

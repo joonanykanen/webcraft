@@ -1,10 +1,21 @@
 /** HUD: crosshair, hotbar, hearts/hunger/breath, held item, toasts, debug overlay (UI-3, UI-5). */
-import { HOTBAR_SLOTS, MAX_HEARTS } from '../core/constants.js';
+import { HOTBAR_SLOTS, MAX_HEARTS, MILESTONE_FOCUS_MS } from '../core/constants.js';
 import type { Settings } from '../core/types.js';
 import { itemName, toolOf } from '../world/items.js';
 import { durabilityFrac, paintItem } from './icons.js';
 import { pipImage, type PipKind } from './pips.js';
 import type { HudModel } from '../game/game.js';
+
+/** The "next goal" card (UI-6) as `Game.hudModel()` delivers it. */
+type MilestoneCard = {
+  title: string;
+  goal: string;
+  icon: number;
+  have: number;
+  need: number;
+  unlocked: number;
+  total: number;
+};
 
 function el<T extends HTMLElement>(id: string): T {
   const e = document.getElementById(id);
@@ -107,23 +118,87 @@ export class Hud {
    * UI-6: the HUD's "next goal" line. Replaces the tutorial cards: instead of explaining the game
    * up front, it keeps telling the player what to do next.
    */
-  setMilestone(m: { title: string; goal: string; icon: number; have: number; need: number; unlocked: number; total: number } | null): void {
+  setMilestone(m: MilestoneCard | null): void {
+    this.milestoneData = m;
     if (!m) {
       this.tracker.classList.add('hidden');
       return;
     }
+    this.tracker.classList.remove('hidden');
+    this.syncMilestone();
+
+    const prev = this.lastMilestoneData;
+    // "Relevant" means the goal changed, or something was achieved. Picking up one more log out of
+    // twelve is deliberately NOT a reason to put the card back on screen — that is what made it a
+    // permanent fixture covering the world.
+    const newGoal = !prev || prev.title !== m.title;
+    const achieved = !!prev && m.unlocked > prev.unlocked;
     const key = `${m.title}:${m.have}`;
     if (key === this.lastMilestone) return;
     this.lastMilestone = key;
     this.trackerTitle.textContent = m.title;
     this.trackerGoal.textContent = `${m.goal} (${m.have}/${m.need}) · ${m.unlocked}/${m.total} done`;
     paintItem(this.trackerIcon, m.icon);
-    this.tracker.classList.remove('hidden');
+    if (!prev || newGoal || achieved) this.focusMilestones();
+    else this.syncMilestone();
+    this.lastMilestoneData = m;
+  }
+
+  /** Bring the goal card back for `holdMs` (new goal, milestone unlocked, panel opened, Tab). */
+  focusMilestones(holdMs = MILESTONE_FOCUS_MS): void {
+    this.milestoneUntil = performance.now() + holdMs;
     this.tracker.classList.remove('bump');
     void this.tracker.offsetWidth; // restart the pop animation
     this.tracker.classList.add('bump');
+    this.syncMilestone();
   }
+
+  /** A panel (inventory/crafting/chest) is open: the goal is what you act on there, so keep it up. */
+  setMilestoneContext(open: boolean): void {
+    this.milestoneContext = open;
+    if (open) this.milestoneUntil = Number.POSITIVE_INFINITY;
+    else this.milestoneUntil = performance.now() + MILESTONE_FOCUS_MS;
+    this.syncMilestone();
+  }
+
+  /** Tab: pin the card open, or let it fade again. Returns true when pinned. */
+  toggleMilestonePinned(): boolean {
+    this.milestonePinned = !this.milestonePinned;
+    if (!this.milestonePinned) this.milestoneUntil = performance.now() + 4000;
+    this.syncMilestone();
+    return this.milestonePinned;
+  }
+
+  get milestonePinnedState(): boolean {
+    return this.milestonePinned;
+  }
+
+  /** Fade the card in or out. Called from the HUD tick, so the timeout needs no timer of its own. */
+  syncMilestone(): void {
+    const show =
+      !!this.milestoneData && (this.milestonePinned || this.milestoneContext || performance.now() < this.milestoneUntil);
+    this.tracker.classList.toggle('faded', !show);
+  }
+
+  private milestoneData: MilestoneCard | null = null;
+  private milestoneUntil = 0;
+  private milestonePinned = false;
+  private milestoneContext = false;
+  private lastMilestoneData: MilestoneCard | null = null;
   private lastMilestone = '';
+
+  /** Reset per-world state so a new world starts with a fresh, unpinned goal card. */
+  resetMilestones(): void {
+    this.lastMilestone = '';
+    this.lastMilestoneData = null;
+    this.milestoneData = null;
+    this.milestonePinned = false;
+    this.milestoneContext = false;
+    this.milestoneUntil = 0;
+    this.tracker.classList.add('hidden');
+    this.tracker.classList.remove('faded');
+  }
+
 
   /**
    * Hearts and hunger must sit flush with the hotbar (UI-3). The hotbar width depends on the slot
@@ -235,6 +310,7 @@ export class Hud {
       ['mobs', `${m.mobs} (${m.hostiles} hostile) · ent ${m.entities}`],
       ['held', hold],
       ['target', m.targetBlock ? `${itemName(m.targetBlock)} @ ${m.reach?.toFixed(2)}m` : 'none'],
+      ['look', m.look],
       ['state', `${m.mode} · ${m.quality} · webgl${m.webgl2 ? '2' : '1'}${m.flying ? ' · fly' : ''}${m.sneaking ? ' · sneak' : ''}${m.onGround ? '' : ' · air'}`],
       ['mined', `${m.stats.blocksMined} · placed ${m.stats.blocksPlaced} · deaths ${m.deaths}`],
       ['seed', String(m.seed)],

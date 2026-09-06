@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import { DAY_LENGTH_MS } from '../src/core/constants.js';
-import { dayNightCurve } from '../src/core/daynight.js';
+import { DayClock, dayNightCurve } from '../src/core/daynight.js';
 
 /**
  * The curve that drives the sky, the terrain light and mob behaviour (RD-5).
@@ -111,5 +111,50 @@ describe('day/night curve', () => {
     // And at sunrise itself the world is mid-transition, not already fully lit.
     expect(dayNightCurve(0).day).toBeGreaterThan(0.35);
     expect(dayNightCurve(0).day).toBeLessThan(0.65);
+  });
+});
+
+describe('world clock (DayClock)', () => {
+  const CYCLE = DAY_LENGTH_MS / 1000; // seconds
+
+  it('advances at exactly one cycle per DAY_LENGTH_MS and wraps', () => {
+    const c = new DayClock(0);
+    expect(c.advance(1000)).toBeCloseTo(1 / CYCLE, 6);
+    c.advance((CYCLE - 1) * 1000);
+    expect(c.t).toBeCloseTo(0, 6); // a full cycle lands back on sunrise
+    expect(c.advance(60_000)).toBeCloseTo(60 / CYCLE, 6);
+  });
+
+  it('ignores garbage frames instead of poisoning the clock', () => {
+    const c = new DayClock(0.3);
+    const before = c.t;
+    c.advance(Number.NaN);
+    c.advance(-5000);
+    expect(c.t).toBeCloseTo(before, 9);
+  });
+
+  it('pinning to the current time is a no-op — saving cannot move the sky', () => {
+    // The bug this pins out: the clock's origin was read live from the save record, and a save wrote
+    // the current time into that record while the elapsed term kept growing. Every autosave therefore
+    // jumped the clock forward by the whole session — a quarter cycle in a single frame.
+    const c = new DayClock(0.45);
+    c.advance(150_000); // five minutes of play
+    const t = c.t;
+    c.pin(t); // what "save, then carry on playing" looks like
+    expect(Math.abs(c.t - t)).toBeLessThan(1e-9);
+    c.advance(1000);
+    const expected = (t + 1 / CYCLE) % 1;
+    expect(Math.abs(c.t - expected)).toBeLessThan(1e-6);
+  });
+
+  it('never moves more than one second of the cycle per second of play', () => {
+    const c = new DayClock(0.5); // sunset
+    let prev = c.t;
+    for (let i = 0; i < 600; i++) {
+      const t = c.advance(16.7); // 60 fps for ten seconds
+      const delta = (t - prev + 1) % 1; // forward distance, wrap-safe
+      expect(delta).toBeLessThanOrEqual(16.7 / DAY_LENGTH_MS + 1e-12);
+      prev = t;
+    }
   });
 });
