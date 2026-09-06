@@ -595,12 +595,17 @@ ul.keys {
 
 #stat-rows {
   position: absolute;
-  bottom: 78px;
+  bottom: 82px; /* a hair of air above the hotbar, but visually one unit with it */
   left: 50%;
   transform: translateX(-50%);
+  /* One line, the way the original does it: hearts hang off the left end of the hotbar, hunger off
+     the right, both on the same baseline. Hud.alignStatRows() sets the width to the hotbar's own
+     measured width, so the two ends are flush with it at every viewport size. */
   display: flex;
-  flex-direction: column;
-  gap: 3px;
+  flex-direction: row;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 6px;
   width: min(560px, 92vw);
 }
 .stat-row {
@@ -608,6 +613,7 @@ ul.keys {
   gap: 1px;
   height: 18px;
   image-rendering: pixelated;
+  flex: 0 0 auto;
 }
 .stat-row.right {
   justify-content: flex-end;
@@ -619,7 +625,7 @@ ul.keys {
   justify-content: flex-end;
 }
 #air-row {
-  justify-content: center;
+  justify-content: flex-end;
 }
 .pip {
   width: 18px;
@@ -910,7 +916,7 @@ ul.keys {
     height: 42px;
   }
   #stat-rows {
-    bottom: 66px;
+    bottom: 70px;
   }
   #hand-item {
     display: none;

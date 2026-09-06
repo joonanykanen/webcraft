@@ -23,11 +23,11 @@ npm run preview
 | Key / button | Action |
 | --- | --- |
 | `W` `A` `S` `D` | Move |
-| `Ctrl` + `W`, double-tap `W`, or `Caps Lock` | Sprint (uses more food). `Caps Lock` exists because macOS binds <kbd>Ctrl</kbd>+<kbd>Space</kbd> to input switching, and `Ctrl`+`W` closes the tab on Windows/Linux |
+| `Alt` + `W`, double-tap `W`, `Caps Lock`, or `Ctrl` + `W` | Sprint (uses more food). Four aliases because the classic combo is not portable: on macOS <kbd>Ctrl</kbd>+<kbd>Space</kbd> is the system input-source switcher (the page never sees it) and <kbd>Ctrl</kbd>+<kbd>W</kbd> can close a tab — see [Keyboard shortcuts that browsers keep](#keyboard-shortcuts-that-browsers-keep) |
 | `Space` | Jump · swim upward · hold while flying to rise (120 ms input buffer + coyote time, so a fast tap is never lost) |
 | `Space` ×2 | Toggle flight (creative only) |
 | `Shift` | Sneak (will not walk off an edge) · hold while flying to descend |
-| `Mouse` | Look around. Click the world to hand the mouse over: the cursor disappears and raw movement drives the camera. Any menu gives it back. Deliberately **not** the Pointer Lock API — see [Pointer capture](#pointer-capture) |
+| `Mouse` | Look around. Click the world to grab the cursor: it is locked to the window, so look never runs out and cannot be spoiled by a second monitor. Menus, dialogs and `Esc` give it back. Settings → *Lock mouse while playing* switches to a free-cursor fallback — see [Mouse capture](#mouse-capture) |
 | **LMB** (hold) | Mine the block under the crosshair / attack a mob (the arm punches on every click, including into air) |
 | **RMB** | Place the held block, open a chest/crafting table, eat |
 | **MMB** | Pick block (creative) |
@@ -172,7 +172,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 197 vitest tests (13 files, ~11 s, Node environment)
+npm run test         # 200 vitest tests (13 files, ~11 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -190,10 +190,10 @@ npm run verify       # everything
 | `tests/entities.test.ts` | explosion radius & witnesses, indestructible/fluid survival, TNT chaining and fuse, diff recording, gravity blocks and re-placing, drop pickup/expiry, mob caps/despawn/loot/chase/creative-immunity, day-vs-night spawn rules, sunburn, mob save round-trip |
 | `tests/survival.test.ts` | fall/landing/jump/walk/sprint/sneak speeds, jump input buffering + coyote time, fall damage + water + creative immunity, flight gating, breath & drowning & refill, hunger/starvation/regeneration/eating, damage window, respawn, void safety net |
 | `tests/worldgen-structure.test.ts` | trees actually grow trunks (no floating canopies), trunk columns are contiguous and stand on solid ground, no bare log tip pokes through a canopy, cacti on desert sand, all 7 biomes occur in sane shares, snow reaches the surface |
-| `tests/input.test.ts` | capture without the Pointer Lock API, Escape always reaches the app, menu ownership clears held keys, look only while captured, identical look with/without LMB held, per-event clamp + NaN rejection, sprint aliases (Ctrl, Caps Lock, double-tap W), jump buffering + stale-tap expiry, touch merge, wheel |
+| `tests/input.test.ts` | capture with and without pointer lock, Escape always reaches the app, menu ownership clears held keys, look only while the world owns the mouse, identical look with/without LMB held, per-event clamp + NaN rejection + implausible coordinate jumps, sprint aliases (Ctrl, Alt, Caps Lock, double-tap W), jump buffering + stale-tap expiry, touch merge, wheel |
 | `tests/milestones.test.ts` | unlock from observed play, quantity counting, requirement gating + retroactive unlock, the whole 21-goal chain is completable, save/load round-trip with unknown ids dropped, `warmUp` stays silent during load, definition integrity (unique ids, declared-before-used requirements, non-empty goals) |
 | `tests/geometry.test.ts` | face/tile mapping incl. the dedicated front face, centred vs cell-aligned bounds, non-uniform scale, per-face tints, the entity V-flip (mob faces) and UV corners staying strictly inside the `fract()` range |
-| `tests/daynight.test.ts` | the shared day/night curve: day and night plateaux, a monotone twilight band, no discontinuity large enough to snap, and agreement with `Game.nightFactor()` |
+| `tests/daynight.test.ts` | the shared day/night curve: day and night plateaux, a monotone twilight band, the brightest change happening *while the sun is at the horizon* and never exceeding 2 %/s, and agreement with `Game.nightFactor()` |
 
 ### Golden world hashes
 
@@ -207,7 +207,7 @@ new generation in chunks nobody touched).
 ### Browser smoke test
 
 ```
-npm run smoke     # vite preview + real Chrome (52 checks, ~2 min)
+npm run smoke     # vite preview + real Chrome (55 checks, ~2 min)
 npm run verify    # check + smoke
 ```
 
@@ -215,11 +215,14 @@ npm run verify    # check + smoke
 SwiftShader WebGL2 (`playwright-core`, no browser download). Every section is a step, so one
 broken feature cannot cascade into the rest, and the run fails on any uncaught page error.
 It covers: capability probe → world creation form → terrain streaming → HUD structure (hearts and
-hunger measured flush against the hotbar) → the milestone tracker showing the next goal → the
+hunger measured flush against the hotbar, on one shared baseline) → **the projection matching the
+canvas box at three different window sizes** (the aspect bug below was invisible in a single
+screenshot) → the milestone tracker showing the next goal → the
 milestone panel (21 cards, requirement gating, `Esc` back to the pause menu, a log mined unlocks
 the first one) → live game state → trees near spawn have trunks →
 `F3` overlay (>5 fps) → a mob spawned in front of the camera with finite transforms →
-`W` locomotion → a real mouse move turning the camera → hold-LMB mining (polls for the
+`W` locomotion → a real mouse move turning the camera (asserting the mouse was actually grabbed, and
+that rad/px is the same with LMB held as free) → hold-LMB mining (polls for the
 break, so it is not timing-fragile) → RMB placement + a planted crafting table → `E` panel
 (9 + 27 slots, 2×2 or 3×3 depending on table range, 25-entry recipe book) → clicking a
 recipe crafts it → torch block light (0 → 14) → pause stats → save → quit → **Play again**
@@ -228,8 +231,10 @@ survive IndexedDB) → export to `.webcraft.json` → re-import and play the imp
 delete a slot → creative flight + break → settings sliders applied to the live game → the
 first-person arm actually changes the frame (screenshot diff with it hidden) + the arm root sits
 in the bottom-right of camera space → losing the pointer pauses and `Resume` brings HUD + capture
-back with a visible cursor in menus → the mouse was never handed to Pointer Lock → the night curve
-has a real twilight band.
+back with a visible cursor in menus → `Escape` releases the mouse and pauses in one press (and a
+later, separate `Escape` pauses again rather than being swallowed) → the night curve has a real
+twilight band in the model **and** in the rendered pixels (sky luminance is read back with
+`readPixels` across a whole cycle and required to change by under 3 % of its range per second).
 
 **Always `npx vite build` before `npm run smoke`** — the suite serves `dist/`, so a stale build
 produces a cascade of misleading failures (one broken frame-counter reset once produced 17/36).
@@ -258,6 +263,20 @@ probing something a screenshot raised — and all are now covered:
   inside the range (`UV_MAX`), covered by a unit test;
 * the sun, moon and stars were drawn with `depthTest: false`, so at night the sky appeared *in
   front of* hills and trees;
+* the camera kept `aspect = 1` — `Renderer.resize()` was only reachable from a `window resize`
+  event or the settings panel, never from constructing the renderer — so every fresh world rendered
+  ~75 % too wide on a normal window until you happened to resize it. Fixed by measuring the canvas'
+  own CSS box (`Renderer.resize()` + a `ResizeObserver`) and pinned by a smoke step that checks the
+  aspect at three window sizes. Reproduced in headless WebKit (`scripts/probe-aspect.mjs`), which is
+  how a "Safari only" report turned out to be every engine;
+* the day/night ramp was centred on the *bottom* of the sun's arc, so the world was 86 % bright
+  before the sun cleared the horizon and the last 14 % — the part anyone notices — landed in a 30 s
+  window at the wrap of the cycle: "night suddenly jumps to late morning". The ramp is now centred on
+  the horizon (`smoothstep(-0.62, 0.5, elev)`), and a unit test asserts the steepest change is under
+  2 %/s *and* happens near a horizon crossing;
+* hearts and hunger sat on two rows with different baselines, so the HUD looked misaligned no matter
+  how the widths lined up; they are one flex line now, and the smoke asserts the two rows share a
+  top and bottom exactly and never overlap;
 * `nightFactor()` (mob spawning/burning) used a different day/night ramp than the renderer's
   sky, so darkness snapped on while the sky still looked like sunset. Both read
   `core/daynight.ts` now, and the smoke test asserts the twilight band is gradual;
@@ -285,44 +304,75 @@ sets `input.active` and the `mining`/`placing` flags directly, negative `player.
 `BlockId.TORCH` is 18 and `BlockId.CRAFTING_TABLE` is 20, and the in-game state has no active
 `.screen` element (use `window.webcraft.game` to detect play). Menu screens set
 `input.expectUnlock` before taking the cursor, so an intentional hand-over is not mistaken for focus
-loss and does not pause the world again.
+loss and does not pause the world again. `document.pointerLockElement` is the truth about pointer
+lock, and `input.usingLock` mirrors it; `input.locked` is broader — lock *or* fallback.
 
 For anything the assertions cannot express — does the arm *look* right, is that pig's face upright,
 are the hearts really flush with the hotbar — there are small one-purpose probes that boot
 `vite preview`, drive the real page and write cropped PNGs into `smoke/` for a human to read:
 `probe-visual2.mjs` (capture, HUD, punch, look, Esc, milestone panel, mining), `probe-hand.mjs`
 (held empty hand / block / tool / food), `probe-faces.mjs` (mob faces held still), `probe-pips.mjs`
-(HUD geometry at two viewport sizes) and `probe-polish.mjs` (full-screen HUD, punch, unlock toast,
-pause). Run them after `npx vite build` and open the images.
+(HUD geometry at two viewport sizes, including whether the two rows really share a baseline) and
+`probe-polish.mjs` (full-screen HUD, punch, unlock toast, pause). Run them after `npx vite build`
+and open the images.
+
+`probe-aspect.mjs` is the one that runs in **two engines** — Chrome and Playwright's WebKit, i.e.
+Safari's layout engine (`npx playwright install webkit`) — and prints `camera.aspect` against the
+canvas' CSS box plus how many screen pixels one world block spans horizontally vs vertically. That
+combination is what catches a stretched frame, and it is how a Safari-only report was shown to be a
+bug in every engine.
 
 ---
 
-## Pointer capture
+## Mouse capture
 
-The world takes the mouse by hiding the cursor (`body.mouse-captured`) and reading raw
-`movementX/movementY`; every menu, panel and the pause screen gives it back. This is deliberately
-**not** the Pointer Lock API:
+Clicking the world asks the browser for the cursor with the Pointer Lock API; every menu, panel,
+dialog and `Esc` gives it back. Locking is the only model that survives the way people actually play:
+two monitors, click-and-hold mining, dragging past the edge of the window. The old cursor-hidden
+mode (raw `movementX/Y`, nothing grabbed) is still there as an automatic fallback when the request is
+refused — and as a setting, *Lock mouse while playing*, for anyone who would rather keep the cursor.
 
-* Chrome paints an unsuppressible *"Your mouse pointer is now hidden"* toast on every
-  `requestPointerLock()`, which players read as an error;
-* the first `Escape` after locking goes to the browser to dismiss that toast, so pausing needed two
-  presses;
-* entering the lock reports its own recentring as one enormous movement delta, which looked exactly
-  like a sensitivity spike when the player clicked to start mining.
+Three things had to be true before locking could be the default, and all three are covered by tests:
 
-Without it, `Escape` reaches the page every time (one press pauses, one resumes, and `Escape` inside
-the milestone panel returns to the pause menu rather than to the world), menu buttons are clickable
-the instant a menu opens, and `clampStep()` absorbs the pathological deltas that locking used to
-introduce. The trade-off is that nothing stops the OS cursor from leaving the window, so `Input`
-treats `window.blur` and `mouseleave` as "the world lost the mouse" and clears every held key — which
-also fixes the classic *"still running after alt-tab"* bug.
+* **One `Escape` still pauses.** The browser consumes the `Escape` that exits the lock and the page
+  may or may not also see the keydown. `Game` records the pause caused by losing the mouse and
+  ignores an `Escape` within 500 ms of it (`sameKeypressAsLockLoss()`), so the game can never toggle
+  itself back out of the pause in the same key press — and a later, genuinely separate `Escape` still
+  pauses again.
+* **No sensitivity spike on lock.** Granting the lock re-centres the cursor, and that warp arrives
+  as one enormous delta. `Input` drops movement for `LOCK_SETTLE_MS` after the grant and caps every
+  event at `MAX_LOOK_PER_EVENT` (~20°). Holding the left mouse button changes nothing: the smoke
+  suite measures rad/px with the button free and held and requires them to agree.
+* **A refusal is not fatal.** `requestPointerLock()` can reject (wrong document state, a locked-down
+  embedder). The promise is caught, `pointerlockerror` is handled, and a 400 ms watchdog drops to the
+  cursor-hidden path, so the worst case is a playable game with a slightly different feel.
+
+While the world owns the cursor, `body.mouse-captured` hides it; on `window.blur` or `mouseleave`
+`Input` clears every held key and stops actions, which is also what fixes the classic *"my player is
+still sprinting after alt-tab"* bug. Chrome still paints its *"mouse pointer is now hidden"* notice
+for a second or two on lock — that is the browser's, not the page's, and it is the reason the
+setting exists.
+
+## Keyboard shortcuts that browsers keep
+
+The PRD asked for sprint on <kbd>Ctrl</kbd>+<kbd>Space</kbd>. **On macOS that combination is owned by
+the system** (*Select Previous Input Source*), so the page never receives it — no web game can use
+it, and remapping it is a system-settings change outside the game. <kbd>Ctrl</kbd>+<kbd>W</kbd> is
+worse on macOS Chrome (it closes the tab). So sprint answers to four aliases, and the first two work
+on every platform because they are page-side state only:
+
+1. double-tap `W`;
+2. `Caps Lock`;
+3. `Alt`/`Option` + `W` (free on macOS; `Alt` combos are preventDefaulted elsewhere);
+4. `Ctrl` + `W` (works on Windows/Linux, may be swallowed by the browser on macOS).
 
 ---
 
 ## Accessibility & preferences
 
 Settings persist in `localStorage` under `webcraft.settings`: render distance, FOV, mouse
-sensitivity (+ invert Y; the default is ~0.5°/px, double the first build), master/ambient volume,
+sensitivity (+ invert Y; the default is ~1°/px — `LOOK_PER_PIXEL = 0.0176`, doubled twice on
+request from the original 0.0044), master/ambient volume,
 quality (AO + greedy meshing on/off), fall damage, hand view, touch controls, colour-blind block
 edges, debug overlay, and the per-frame chunk budget. Panels are real buttons/inputs
 (tab-navigable, `aria-label`ed), the debug overlay is plain text for screen readers, milestone goals

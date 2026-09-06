@@ -216,6 +216,7 @@ export class Game implements EntityHost {
     this.input.attach(opts.canvas);
     this.input.sensitivity = opts.settings.sensitivity;
     this.input.invertY = opts.settings.invertY;
+    this.input.setLockMouse(opts.settings.lockMouse);
     this.input.onKeyDown = (code) => this.onKey(code);
     // UI-6: milestones react to what the player actually collects, and announce themselves.
     this.inventory.onObtain = (id, n) => {
@@ -229,7 +230,13 @@ export class Game implements EntityHost {
       if (view) this.hooks.onMilestone(view);
     };
     this.input.onLockChange = (locked) => {
-      if (!locked && this.screen === 'none' && this.running) this.setScreen('pause');
+      if (!locked && this.screen === 'none' && this.running) {
+        // Escape is handled by the browser here: it exits pointer lock and the page may or may not
+        // also see the keydown. Remember the pause so a keydown for the *same* press cannot toggle
+        // straight back out of it (which looked like "Escape does nothing").
+        this.lockPauseAt = performance.now();
+        this.setScreen('pause');
+      }
     };
   }
 
@@ -477,9 +484,20 @@ export class Game implements EntityHost {
   }
 
   // ------------------------------------------------------------ keys
+  /** Set when losing the mouse caused a pause (see the onLockChange wiring in the constructor). */
+  private lockPauseAt = -1e9;
+
+  /** True once, for ~0.5 s after a lock loss: the Escape that dropped the lock is this keydown. */
+  private sameKeypressAsLockLoss(): boolean {
+    if (performance.now() - this.lockPauseAt > 500) return false;
+    this.lockPauseAt = -1e9;
+    return true;
+  }
+
   private onKey(code: string): void {
     if (code === 'Escape') {
       if (this.screen === 'death') return;
+      if (this.sameKeypressAsLockLoss()) return;
       this.setScreen(this.screen === 'none' ? 'pause' : 'none');
       return;
     }
@@ -845,6 +863,7 @@ export class Game implements EntityHost {
     this.player.fallDamageEnabled = s.fallDamage;
     this.input.sensitivity = s.sensitivity;
     this.input.invertY = s.invertY;
+    this.input.setLockMouse(s.lockMouse);
     this.audio.setVolume(s.volume);
     this.audio.setAmbientVolume(s.ambientVolume);
     if (prev.quality !== s.quality) this.world.setQuality(s.quality);

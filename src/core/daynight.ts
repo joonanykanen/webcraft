@@ -36,8 +36,8 @@ export interface DayNight {
 export function dayNightCurve(t: number): DayNight {
   const tt = t - Math.floor(t);
   const elev = Math.sin(tt * Math.PI * 2);
-  // Centred slightly below the horizon: the last light lingers a little after sunset.
-  const day = smoothstep(-0.75, 0.18, elev);
+  // Centred on the horizon: half bright exactly at sunrise/sunset, ~115 s of dawn and dusk.
+  const day = smoothstep(-0.62, 0.5, elev);
   const night = 1 - day;
   // Horizon glow peaks as the sun crosses the horizon, independent of how dark it already is.
   const sunset = clamp(1 - Math.abs(elev) / 0.42, 0, 1);

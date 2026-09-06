@@ -354,6 +354,15 @@ export class Menus {
     host.append(q);
 
     toggle('invertY', 'Invert vertical look', 'Mouse up looks up.');
+
+    toggle(
+      'lockMouse',
+      'Lock mouse while playing',
+      'On (default): the browser grabs the cursor, so look never runs out — second monitor, ' +
+        'holding the mouse button, dragging off the edge. Chrome shows a short "mouse pointer is ' +
+        'hidden" notice for it, which can cost one Escape press. Off: nothing is grabbed, so the ' +
+        'cursor stays free to leave the window.',
+    );
     toggle('showHand', 'Show held item', 'HUD preview of the selected stack.');
     toggle('fallDamage', 'Fall damage', 'Off = long drops are harmless.');
     toggle('colorblindEdges', 'Block edge outlines', 'Accessibility: stronger face separation.');

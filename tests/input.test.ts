@@ -80,10 +80,11 @@ describe('input (PH-1 capture without the Pointer Lock API)', () => {
 });
 
 describe('mouse look (PH-6, sensitivity spikes)', () => {
-  it('is twice as fast per pixel as the previous default', () => {
-    // 0.0044 lagged behind the hand on a large screen; the default is now ~0.5°/px.
-    expect(LOOK_PER_PIXEL).toBeGreaterThanOrEqual(0.008);
-    expect(LOOK_PER_PIXEL).toBeLessThanOrEqual(0.012);
+  it('defaults to roughly one degree of look per pixel', () => {
+    // 0.0044 felt laggy, 0.0088 was still half as fast as requested; ~1°/px is the tuned default.
+    // Any further doubling has to be a deliberate decision, not an accident, hence the guard rail.
+    expect(LOOK_PER_PIXEL).toBeGreaterThanOrEqual(0.017);
+    expect(LOOK_PER_PIXEL).toBeLessThanOrEqual(0.02);
   });
 
   it('turns the camera only while the world owns the mouse', () => {
@@ -139,6 +140,20 @@ describe('mouse look (PH-6, sensitivity spikes)', () => {
     expect(input.lookDY).toBeCloseTo(-10 * LOOK_PER_PIXEL);
   });
 
+  it('ignores an implausible coordinate jump in fallback mode', () => {
+    // Without pointer lock the deltas come from clientX/Y. A 900 px jump between two events is the
+    // cursor appearing on another monitor, and it used to snap the camera around.
+    const input = new Input();
+    input.setActive(true);
+    input.capture(); // no document in node => the cursor-hidden fallback
+    input.handleMouseMove(pointer({ clientX: 100, clientY: 100 }));
+    expect(input.consumeLook().dx).toBe(0);
+    input.handleMouseMove(pointer({ clientX: 140, clientY: 100 })); // 40 px = 0.70 rad, event-capped
+    expect(input.consumeLook().dx).toBeGreaterThan(0.3);
+    input.handleMouseMove(pointer({ clientX: 1000, clientY: 100 })); // a teleport, not a swing
+    expect(input.consumeLook().dx).toBe(0);
+  });
+
   it('clamps one event so a stray warp cannot spin the world', () => {
     expect(4000 * LOOK_PER_PIXEL).toBeGreaterThan(MAX_LOOK_PER_EVENT);
     const input = new Input();
@@ -170,6 +185,19 @@ describe('mouse look (PH-6, sensitivity spikes)', () => {
 });
 
 describe('movement snapshot (PH-2 sprint, PH-3 jump)', () => {
+  it('sprints from Alt/Option+W too (macOS owns the Ctrl combos)', () => {
+    // Ctrl+W can close a tab and Ctrl+Space is macOS' input-source switcher, so the page needs an
+    // alias that no browser or OS binds: Alt/Option held while moving forward.
+    const input = new Input();
+    input.setActive(true);
+    input.handleKeyDown(key('KeyW'));
+    expect(input.move().sprint).toBe(false);
+    input.handleKeyDown(key('AltLeft'));
+    expect(input.move().sprint).toBe(true);
+    input.handleKeyUp(key('AltLeft'));
+    expect(input.move().sprint).toBe(false);
+  });
+
   it('sprints from Ctrl+W, from Caps Lock, and from a double-tapped W', () => {
     const input = new Input();
     input.setActive(true);

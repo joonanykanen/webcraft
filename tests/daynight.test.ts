@@ -47,12 +47,12 @@ describe('day/night curve', () => {
       }
       return (n / 400) * (to - from);
     };
-    const dusk = inTwilight(0.45, 0.7); // sunset is at 0.5
-    const dawn = inTwilight(0.75, 0.98); // sunrise is at 0.0/1.0
+    const dusk = inTwilight(0.4, 0.75); // sunset is at 0.5
+    const dawn = inTwilight(0.72, 1.0) + inTwilight(0, 0.12); // sunrise is at 0.0/1.0, ramp wraps
     const cycle = DAY_LENGTH_MS / 1000; // seconds
-    // ~80 s of dusk and ~80 s of dawn; anything under half that is the "instant night" bug again.
-    expect(dusk * cycle).toBeGreaterThan(45);
-    expect(dawn * cycle).toBeGreaterThan(45);
+    // ~115 s of dusk and dawn each; anything under a minute is the "instant night" bug again.
+    expect(dusk * cycle).toBeGreaterThan(60);
+    expect(dawn * cycle).toBeGreaterThan(60);
   });
 
   it('never leaves the world pitch black', () => {
@@ -78,8 +78,38 @@ describe('day/night curve', () => {
     }
   });
 
-  it('is still bright at sunset and dark well before midnight', () => {
-    expect(dayNightCurve(0.5).day).toBeGreaterThan(0.6); // golden hour, not black
-    expect(dayNightCurve(0.6).night).toBeGreaterThan(0.8); // properly dark by 1/10 of the cycle in
+  it('is half bright at the horizon and dark well before midnight', () => {
+    // The ramp is centred on elev 0 on purpose, so sunrise/sunset is the middle of the change
+    // rather than its end. That is what stops the world from lurching from dark to daylight.
+    expect(dayNightCurve(0.5).day).toBeGreaterThan(0.4);
+    expect(dayNightCurve(0.5).day).toBeLessThan(0.6);
+    expect(dayNightCurve(0.6).night).toBeGreaterThan(0.9); // properly dark 1/10 of a cycle later
+    expect(dayNightCurve(0.9).night).toBeGreaterThan(0.9); // and still dark just before dawn
+  });
+
+  it('does the brightening while the sun is actually rising', () => {
+    // Regression for "night suddenly jumps to day": most of the day/night change must happen while
+    // the sun is near the horizon (visible), and no single second may change the light much.
+    const cycle = DAY_LENGTH_MS / 1000;
+    let maxPerSec = 0;
+    let tOfMax = 0;
+    let prev = dayNightCurve(0).day;
+    for (let i = 1; i <= 4000; i++) {
+      const t = i / 4000;
+      const day = dayNightCurve(t).day;
+      const rate = Math.abs(day - prev) / (cycle / 4000);
+      if (rate > maxPerSec) {
+        maxPerSec = rate;
+        tOfMax = t;
+      }
+      prev = day;
+    }
+    expect(maxPerSec).toBeLessThan(0.02); // ≤ 2 % of the full range per second (of 600 s)
+    // The steepest moment must be within ~10 % of the cycle of a horizon crossing (0.0 / 0.5).
+    const distToSunrise = Math.min(Math.abs(tOfMax), Math.abs(tOfMax - 0.5), Math.abs(tOfMax - 1));
+    expect(distToSunrise).toBeLessThan(0.1);
+    // And at sunrise itself the world is mid-transition, not already fully lit.
+    expect(dayNightCurve(0).day).toBeGreaterThan(0.35);
+    expect(dayNightCurve(0).day).toBeLessThan(0.65);
   });
 });

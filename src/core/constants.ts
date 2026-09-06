@@ -16,12 +16,23 @@ export const TICK_MS = 1000 / TICK_RATE;
 export const DAY_LENGTH_MS = 10 * 60 * 1000; // RD-5: full cycle = 10 minutes
 
 // ---- input ----
-/** Radians of look per raw mouse pixel at sensitivity 1.0 (halved scale felt sluggish). */
-export const LOOK_PER_PIXEL = 0.0088;
-/** Ignore look deltas this long after pointer lock engages: the recentring is reported as one
- * enormous movement delta and looked like the sensitivity spiking. */
-/** One mousemove may never turn more than this (radians): kills "sensitivity spike" jumps. */
-export const MAX_LOOK_PER_EVENT = 0.9;
+/**
+ * Radians of look per raw mouse pixel at sensitivity 1.0 — about one degree per pixel, i.e. a
+ * comfortable 90-degree turn in ~125 px. The settings slider multiplies this.
+ */
+export const LOOK_PER_PIXEL = 0.0176;
+/**
+ * One mousemove may never turn more than this (radians, ~20 degrees). Real events are a handful of
+ * pixels, so this only ever fires on a synthetic/refocus jump — which is what used to read as the
+ * sensitivity "rising" while the left mouse button was held.
+ */
+export const MAX_LOOK_PER_EVENT = 0.35;
+/** After the browser grants pointer lock it re-centres the cursor; that warp is reported as one
+ * enormous delta, so movement is ignored for this long. */
+export const LOCK_SETTLE_MS = 150;
+/** A coordinate jump larger than this between two events is the cursor teleporting (focus change,
+ * another monitor), not the player moving the mouse. */
+export const MAX_CLIENT_JUMP = 260;
 
 // ---- physics (PH-2, PH-3) ----
 export const PLAYER_WIDTH = 0.6;

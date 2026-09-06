@@ -66,9 +66,10 @@ async function startWorld(page, { name, seed, mode = 'survival' }) {
   await page.waitForFunction(() => !!window.webcraft?.game && !document.querySelector('.screen.active'), null, {
     timeout: 60000,
   });
-  // The world only owns the mouse after a click into it (no Pointer Lock banner involved);
-  // the harness takes ownership the same way a player's first click would.
-  await page.evaluate(() => window.webcraft.game.input.capture());
+  // The world only owns the mouse after a click into it; take ownership the way a player's first
+  // click would — a real gesture, which is what Pointer Lock requires.
+  await page.mouse.click(640, 400);
+  await page.waitForTimeout(300);
 }
 
 async function worldLoaded(page) {
@@ -152,8 +153,8 @@ async function main() {
 
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
   const page = await context.newPage();
-  // Issue #1 is "Chrome says the mouse pointer is hidden". That banner only appears through the
-  // Pointer Lock API, so the game must never call it — count the calls from the very start.
+  // Pointer Lock is the intended mouse model, so count the calls from the very start: the game must
+  // ask for it, must survive a browser that refuses it, and must always give the cursor back for menus.
   await page.addInitScript(() => {
     window.__pointerLockCalls = 0;
     const orig = Element.prototype.requestPointerLock;
@@ -163,6 +164,7 @@ async function main() {
     };
   });
   activePage = page;
+  let pointerMode = 'unknown';
   const consoleErrors = [];
   const pageErrors = [];
   page.on('console', (m) => {
@@ -207,13 +209,65 @@ async function main() {
       const hot = box('hotbar');
       const heart = box('health-row');
       const food = box('hunger-row');
-      return { left: heart.left - hot.left, right: hot.right - food.right, gap: hot.top - heart.bottom };
+      return {
+        left: heart.left - hot.left,
+        right: hot.right - food.right,
+        gap: hot.top - heart.bottom,
+        // one line, two baselines is the bug: the rows must share top and bottom exactly
+        topDiff: heart.top - food.top,
+        bottomDiff: heart.bottom - food.bottom,
+        overlap: heart.right - food.left,
+      };
     });
     check(
       'HUD: hearts/hunger are flush with the hotbar edges (UI-3)',
       Math.abs(flush.left) <= 4 && Math.abs(flush.right) <= 4 && flush.gap >= 0 && flush.gap <= 22,
       JSON.stringify(flush),
     );
+    check(
+      'HUD: hearts and hunger share one line and never overlap (UI-3)',
+      Math.abs(flush.topDiff) <= 1 && Math.abs(flush.bottomDiff) <= 1 && flush.overlap <= 0,
+      JSON.stringify(flush),
+    );
+
+    // RD-2 (regression): the frame used to render with camera.aspect 1 on a wide window because the
+    // renderer was never sized until a resize/settings event — everything came out ~75 % too wide.
+    await step('the projection matches the canvas box at any size (no stretched frame)', async () => {
+      const measure = async () =>
+        page.evaluate(() => {
+          const cv = document.getElementById('viewport');
+          const b = cv.getBoundingClientRect();
+          const g = window.webcraft.game;
+          return {
+            box: [Math.round(b.width), Math.round(b.height)],
+            boxAspect: +(b.width / b.height).toFixed(4),
+            camAspect: +g.renderer.camera.aspect.toFixed(4),
+            backing: [cv.width, cv.height],
+            backingAspect: +(cv.width / cv.height).toFixed(4),
+          };
+        });
+      const report = [];
+      for (const vp of [
+        { width: 1280, height: 800 },
+        { width: 900, height: 760 },
+        { width: 1440, height: 620 },
+      ]) {
+        await page.setViewportSize(vp);
+        await page.waitForTimeout(350);
+        const m = await measure();
+        const dpr = Math.min(await page.evaluate(() => window.devicePixelRatio || 1), 2);
+        const aspectErr = Math.abs(m.camAspect - m.boxAspect);
+        const bufferErr = Math.abs(m.backing[0] / m.backing[1] - m.boxAspect);
+        const exact = Math.abs(m.backing[0] - Math.round(m.box[0] * dpr)) <= 2;
+        if (aspectErr > 0.01) throw new Error(`camera aspect ${m.camAspect} != box ${m.boxAspect} at ${vp.width}x${vp.height}`);
+        if (bufferErr > 0.01) throw new Error(`drawing buffer is ${m.backing} (${m.backingAspect}) but the box is ${m.box}`);
+        if (!exact) throw new Error(`drawing buffer width ${m.backing[0]} != box ${m.box[0]} × dpr ${dpr}`);
+        report.push(`${vp.width}x${vp.height}→${m.camAspect}`);
+      }
+      await page.setViewportSize({ width: 1280, height: 800 });
+      await page.waitForTimeout(300);
+      return `aspect tracked the box: ${report.join(' ')}`;
+    });
     check('player starts with full health and food', hud.health >= 20 && hud.food >= 19, `health=${hud.health} food=${hud.food}`);
     check('debug overlay hidden by default', hud.debugHidden === true);
 
@@ -296,9 +350,10 @@ async function main() {
       });
       if (!locked.game) throw new Error('click did not capture the mouse: ' + JSON.stringify(locked));
       if (!locked.cursorHidden) throw new Error('cursor stayed visible over the world: ' + JSON.stringify(locked));
-      // The whole point: never call requestPointerLock — that is what painted Chrome's
-      // "Your mouse pointer is hidden" banner and swallowed the first Escape.
-      if (locked.plElement || locked.plCalls > 0) throw new Error('pointer lock was used: ' + JSON.stringify(locked));
+      // Pointer Lock is the primary path; the fallback (cursor hidden, no API grab) is also acceptable
+      // — what must never happen is a *visible* cursor over the world or a click that does nothing.
+      if (locked.plCalls === 0) throw new Error('the game never asked for pointer lock: ' + JSON.stringify(locked));
+      pointerMode = locked.plElement ? 'pointer lock' : 'cursor-hidden fallback';
       const before = await page.evaluate(() => ({ yaw: window.webcraft.game.player.yaw, pitch: window.webcraft.game.player.pitch }));
       for (let i = 1; i <= 6; i++) await page.mouse.move(500 + i * 18, 350 - i * 5);
       await page.waitForTimeout(200);
@@ -313,7 +368,18 @@ async function main() {
         window.webcraft.game.player.yaw = 0;
         window.webcraft.game.player.pitch = 0;
       });
-      return `Δyaw=${turned.toFixed(3)} Δpitch=${pitched.toFixed(3)} (${(Math.abs(turned) / 108).toFixed(4)} rad/px, no pointer lock)`;
+      // Holding the left button must not change the response (the old "sensitivity rises while
+      // mining" complaint): the same pixels have to turn the same amount.
+      const beforeHold = await page.evaluate(() => window.webcraft.game.player.yaw);
+      await page.mouse.down();
+      for (let i = 1; i <= 6; i++) await page.mouse.move(500 + i * 18, 350);
+      await page.waitForTimeout(150);
+      const held = await page.evaluate(() => window.webcraft.game.player.yaw);
+      await page.mouse.up();
+      const perPxHeld = Math.abs(held - beforeHold) / 108;
+      const free = Math.abs(turned) / 108;
+      if (perPxHeld < free * 0.5) throw new Error(`look slowed while LMB was held (${perPxHeld.toFixed(4)} vs ${free.toFixed(4)} rad/px)`);
+      return `Δyaw=${turned.toFixed(3)} Δpitch=${pitched.toFixed(3)} (${(Math.abs(turned) / 108).toFixed(4)} rad/px, ${pointerMode})`;
     });
 
     const st = await page.evaluate(() => {
@@ -683,6 +749,14 @@ async function main() {
       // invisible with the keyboard still swallowed. Resume must restore HUD + capture.
       await page.keyboard.press('Escape', { pauseDelay: 0 });
       await page.waitForFunction(() => window.webcraft.game.screen === 'pause', null, { timeout: 4000 });
+      const handed = await page.evaluate(() => ({
+        lockHeld: !!document.pointerLockElement,
+        cursorHidden: document.body.classList.contains('mouse-captured'),
+        screen: window.webcraft.game.screen,
+      }));
+      // One Escape has to be enough: the pause menu owns the cursor, and the game must not have
+      // toggled itself straight back out of the pause in the same key press.
+      if (handed.lockHeld || handed.cursorHidden) throw new Error('Escape left the mouse captured: ' + JSON.stringify(handed));
       await page.click('#btn-resume');
       await page.waitForTimeout(500);
       const state = await page.evaluate(() => ({
@@ -708,8 +782,25 @@ async function main() {
       if (paused.hiddenInMenu) throw new Error('cursor still hidden while the pause menu is open');
       if (!paused.clickable) throw new Error('Resume button not clickable');
       await page.click('#btn-resume');
-      await page.waitForTimeout(200);
-      return 'HUD + capture + visible cursor in menus all correct';
+      await page.waitForTimeout(300);
+      const relocked = await page.evaluate(() => ({
+        locked: window.webcraft.game.input.locked,
+        usingLock: window.webcraft.game.input.usingLock,
+        element: document.pointerLockElement === document.getElementById('viewport'),
+        calls: window.__pointerLockCalls,
+      }));
+      if (!relocked.locked) throw new Error('resume did not take the mouse back: ' + JSON.stringify(relocked));
+      if (relocked.calls === 0) throw new Error('the game never requested pointer lock: ' + JSON.stringify(relocked));
+      // A *second*, separate Escape must pause again — the coalescing guard for the key press that
+      // dropped the lock must not swallow later presses.
+      await page.waitForTimeout(600);
+      await page.keyboard.press('Escape', { pauseDelay: 0 });
+      await page.waitForTimeout(400);
+      const second = await page.evaluate(() => window.webcraft.game.screen);
+      if (second !== 'pause') throw new Error(`second Escape did not pause (screen=${second}) — pause toggled twice or the guard stuck`);
+      await page.click('#btn-resume');
+      await page.waitForTimeout(300);
+      return `HUD + capture (${relocked.usingLock && relocked.element ? 'pointer lock' : 'fallback'}, ${relocked.calls} requests) + visible cursor in menus`;
     });
 
     await step('night falls gradually instead of snapping (RD-5)', async () => {
@@ -737,6 +828,53 @@ async function main() {
     });
 
     // ------------------------------------------------------------ pause, save, quit, reload
+    // The simulation curve above is not what the player sees; this measures the *pixels*, which is
+    // the only way to catch a sky that changes gradually in the model but snaps on screen.
+    await step('the rendered sky brightens gradually all the way round (RD-5)', async () => {
+      const lums = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const cv = document.getElementById('viewport');
+        const gl = g.renderer.three.getContext();
+        if (!gl) throw new Error('no WebGL context to read pixels from');
+        // The clock keeps ticking while we sample, but the loop clamps each frame to 0.5 s (600 s
+        // cycle = 0.08 % of a day), so the drift between samples is far below the step we test.
+        const w = 120;
+        const h = 80;
+        const px = new Uint8Array(w * h * 4);
+        const out = [];
+        for (let i = 0; i <= 24; i++) {
+          const t = i / 24;
+          g.record.data.timeOfDay = t;
+          g.timeMs = 0;
+          await new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r)));
+          gl.readPixels(Math.floor(cv.width / 2 - w / 2), Math.floor(cv.height * 0.62), w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+          let sum = 0;
+          for (let p = 0; p < px.length; p += 4) sum += (px[p] + px[p + 1] + px[p + 2]) / 3;
+          out.push(sum / (px.length / 4));
+        }
+        g.record.data.timeOfDay = 0.25;
+        g.timeMs = 0;
+        return out;
+      });
+      const min = Math.min(...lums);
+      const max = Math.max(...lums);
+      const range = max - min;
+      if (!(min < 12)) throw new Error(`the sky never really gets dark (min luminance ${min.toFixed(1)}): ${lums.map((v) => v.toFixed(0)).join(' ')}`);
+      if (!(max > 55)) throw new Error(`the sky never really gets bright (max luminance ${max.toFixed(1)})`);
+      if (range < 30) throw new Error(`dark and bright are too close to be a day/night cycle (range ${range.toFixed(1)})`);
+      // Judge it as a rate: a 10-minute cycle sampled every 25 s legitimately moves ~30 % of the
+      // range per sample in the middle of dusk. What must not exist is a *rate* that looks like a snap.
+      const secondsPerSample = 600 / (lums.length - 1);
+      let maxRate = 0;
+      for (let i = 1; i < lums.length; i++) {
+        maxRate = Math.max(maxRate, Math.abs(lums[i] - lums[i - 1]) / range / secondsPerSample);
+      }
+      if (maxRate > 0.03) throw new Error(`the rendered light changes ${Math.round(maxRate * 100)} % of its range per second: ${lums.map((v) => v.toFixed(0)).join(' ')}`);
+      const mid = lums.filter((v) => v > min + range * 0.1 && v < min + range * 0.9).length;
+      if (mid < 6) throw new Error(`only ${mid}/25 samples are in-between — that is two plateaus, not a ramp`);
+      return `sky luminance ${min.toFixed(0)}→${max.toFixed(0)}, worst rate ${(maxRate * 100).toFixed(1)} %/s, ${mid} twilight samples`;
+    });
+
     await step('Escape pauses with live world stats', async () => {
       await page.keyboard.press('Escape');
       await page.waitForFunction(isActive('screen-pause'), null, { timeout: 4000 });

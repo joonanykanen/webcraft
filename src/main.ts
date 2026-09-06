@@ -65,7 +65,9 @@ function boot(): void {
   applyViewport();
   window.addEventListener('resize', () => {
     applyViewport();
-    game?.renderer.resize(window.innerWidth, window.innerHeight);
+    // The Renderer measures the canvas' own CSS box; the observer inside it already handles this,
+    // but the menu canvas (before a world exists) still needs the manual sizing below.
+    game?.renderer.resize();
   });
   window.addEventListener('keydown', onGlobalKey);
   document.addEventListener('visibilitychange', () => {
@@ -85,9 +87,14 @@ function webkitAudioCtx(): unknown {
 }
 
 function applyViewport(): void {
+  // Only for the pre-game canvas: once a Renderer exists it owns the drawing buffer, because the
+  // aspect must come from the live CSS box or the whole frame gets stretched (see Renderer.resize).
+  if (window.webcraft?.game) return;
   const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  canvas.width = Math.floor(window.innerWidth * dpr);
-  canvas.height = Math.floor(window.innerHeight * dpr);
+  const w = canvas.clientWidth || window.innerWidth;
+  const h = canvas.clientHeight || window.innerHeight;
+  canvas.width = Math.floor(w * dpr);
+  canvas.height = Math.floor(h * dpr);
 }
 
 function onGlobalKey(e: KeyboardEvent): void {
@@ -121,7 +128,7 @@ function applySettings(next: Settings): void {
   hud.setDebugVisible(settings.debugOverlay);
   if (game) {
     game.setSettings(settings);
-    game.renderer.resize(window.innerWidth, window.innerHeight);
+    game.renderer.resize();
     if (!menus.isOpen()) menus.setTouchVisible(settings.showTouchControls);
   }
 }

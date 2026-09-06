@@ -192,8 +192,11 @@ export class Hud {
 
     this.updatePips('heart', this.pips.heart, m.health, m.maxHealth);
     this.updatePips('food', this.pips.food, m.food, m.maxFood);
-    this.airRow.classList.toggle('hidden', m.air >= m.maxAir - 0.01);
-    if (m.air < m.maxAir) this.updatePips('air', this.pips.air, m.air, m.maxAir);
+    const breathing = m.air >= m.maxAir - 0.01;
+    this.airRow.classList.toggle('hidden', breathing);
+    // Bubbles share the line with hunger, so they take its slot instead of squeezing the row.
+    this.hungerRow.style.visibility = breathing ? '' : 'hidden';
+    if (!breathing) this.updatePips('air', this.pips.air, m.air, m.maxAir);
     this.setWater(m.inWater && m.sky > 0 ? true : m.inWater);
 
     if (this.debugVisible) this.debugEl.innerHTML = this.debugText(m);

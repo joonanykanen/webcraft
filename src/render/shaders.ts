@@ -97,8 +97,8 @@ void main() {
   vec3 col = mix(uHorizon, uTop, pow(clamp(h, 0.0, 1.0), 0.55));
   col = mix(col, uHorizon * 0.72, clamp(-h * 3.2, 0.0, 1.0));
   float s = max(dot(d, normalize(uSunDir)), 0.0);
-  col += uSunColor * pow(s, 6.0) * uSunGlow * 0.55;
-  col += uSunColor * pow(s, 90.0) * uSunGlow;
+  col += uSunColor * pow(s, 22.0) * uSunGlow * 0.4; // halo, tight enough not to bleach the sky
+  col += uSunColor * pow(s, 110.0) * uSunGlow; // the disc itself
   gl_FragColor = vec4(col, 1.0);
 }
 `;

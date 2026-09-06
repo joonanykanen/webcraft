@@ -1,5 +1,5 @@
 /** Input: keyboard + captured-mouse look (PH-1), wheel, gamepad (PH-7) and touch overrides (UI-4). */
-import { LOOK_PER_PIXEL, MAX_LOOK_PER_EVENT } from '../core/constants.js';
+import { LOCK_SETTLE_MS, LOOK_PER_PIXEL, MAX_CLIENT_JUMP, MAX_LOOK_PER_EVENT } from '../core/constants.js';
 
 export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
 
@@ -15,7 +15,10 @@ const GAME_KEYS = new Set([
   'KeyC',
   'Space',
   'ShiftLeft',
+  'ShiftRight',
   'ControlLeft',
+  'AltLeft',
+  'AltRight',
   'Tab',
   'F3',
   'Escape',
@@ -67,6 +70,8 @@ export class Input {
   readonly down = new Set<string>();
   /** True while the world owns the mouse (cursor hidden, movement drives the camera). */
   locked = false;
+  /** True specifically while the *Pointer Lock* API owns the cursor (rather than the fallback). */
+  usingLock = false;
   active = false; // false while a menu/screen owns the keyboard
   uiKeys = false; // true while the inventory/chest panel is open (E and Escape still reach the game)
   mining = false;
@@ -109,6 +114,10 @@ export class Input {
   private lastX = 0;
   private lastY = 0;
   private hasLast = false;
+  /** When the lock was granted; movement right after it is the browser re-centring the cursor. */
+  private lockSettledAt = -1e9;
+  /** Prefer Pointer Lock (unbounded look, no second-monitor escape). Falls back automatically. */
+  private lockMouse = true;
   private gamepadButtons: boolean[] = [];
   private gamepadAxes = [0, 0, 0, 0];
   private gamepadConnected = false;
@@ -121,6 +130,8 @@ export class Input {
     canvas.addEventListener('mousedown', this.mouseDown);
     window.addEventListener('mouseup', this.mouseUp);
     window.addEventListener('mousemove', this.mouseMove);
+    document.addEventListener('pointerlockchange', this.lockChanged);
+    document.addEventListener('pointerlockerror', this.lockFailed);
     window.addEventListener('wheel', this.wheelHandler, { passive: true });
     window.addEventListener('contextmenu', this.contextMenu);
     // the pointer left the window: the world no longer has it
@@ -141,6 +152,8 @@ export class Input {
     this.canvas?.removeEventListener('mousedown', this.mouseDown);
     window.removeEventListener('mouseup', this.mouseUp);
     window.removeEventListener('mousemove', this.mouseMove);
+    document.removeEventListener('pointerlockchange', this.lockChanged);
+    document.removeEventListener('pointerlockerror', this.lockFailed);
     window.removeEventListener('wheel', this.wheelHandler);
     window.removeEventListener('contextmenu', this.contextMenu);
     document.removeEventListener('mouseleave', this.windowLeft);
@@ -222,17 +235,26 @@ export class Input {
     // movementX/Y is exact; clientX deltas are the fallback (and let tests drive the camera).
     // Some engines report `undefined`/NaN on the first event after a focus change — feeding that
     // into the yaw would make every coordinate NaN (= unplayable world), so sanitise first.
-    let dx = Number.isFinite(e.movementX) ? e.movementX : 0;
-    let dy = Number.isFinite(e.movementY) ? e.movementY : 0;
-    if (dx === 0 && dy === 0 && this.hasLast) {
+    const rawX = Number.isFinite(e.movementX) ? e.movementX : 0;
+    const rawY = Number.isFinite(e.movementY) ? e.movementY : 0;
+    let dx = rawX;
+    let dy = rawY;
+    if (dx === 0 && dy === 0 && !this.usingLock && this.hasLast) {
       dx = e.clientX - this.lastX;
       dy = e.clientY - this.lastY;
+      // A jump this big is the cursor teleporting (focus change, another screen), not a swing of
+      // the wrist. Believing it is what used to feel like "the sensitivity rises on its own".
+      if (Math.abs(dx) > MAX_CLIENT_JUMP || Math.abs(dy) > MAX_CLIENT_JUMP) {
+        dx = 0;
+        dy = 0;
+      }
     }
     this.lastX = e.clientX;
     this.lastY = e.clientY;
     this.hasLast = true;
-    // One gigantic delta (refocussed tab, a drag resumed far away) used to read as "the
-    // sensitivity spikes while the mouse button is held". A single event may never spin the camera.
+    // Pointer lock re-centres the cursor on grant; that warp arrives as one enormous delta.
+    if (this.usingLock && performance.now() - this.lockSettledAt < LOCK_SETTLE_MS) return;
+    // One gigantic delta (refocussed tab, a drag resumed far away) must never spin the camera.
     const step = LOOK_PER_PIXEL * this.sensitivity;
     this.lookDX += clampStep(dx * step);
     this.lookDY += clampStep(dy * step) * (this.invertY ? -1 : 1);
@@ -248,22 +270,102 @@ export class Input {
     this.gamepadConnected = navigator.getGamepads?.().some((p) => !!p) ?? false;
   };
 
-  /** Take the mouse: hide the cursor, movement drives the camera. No browser banner involved. */
+  /** Take the mouse: hide the cursor, movement drives the camera. */
   capture(): void {
-    if (this.locked) return;
-    this.wantCapture = false;
+    if (this.lockMouse && this.active && typeof document !== 'undefined') {
+      this.requestLock();
+      return;
+    }
     this.setCaptured(true, false);
   }
+
+  /**
+   * Ask for Pointer Lock. Needs a user gesture (click, key press); if the browser refuses we keep
+   * playing in cursor-hidden mode rather than leaving the player with a dead mouse.
+   */
+  requestLock(): void {
+    if (typeof document === 'undefined' || !this.canvas) return;
+    if (document.pointerLockElement === this.canvas) {
+      this.lockChanged();
+      return;
+    }
+    this.wantCapture = false;
+    try {
+      // `unadjustedMovement` asks for raw device deltas (no OS pointer acceleration).
+      const req = this.canvas.requestPointerLock({ unadjustedMovement: true }) as unknown;
+      if (req && typeof (req as Promise<void>).catch === 'function') {
+        (req as Promise<void>).catch(() => this.setCaptured(true, false));
+      }
+    } catch {
+      try {
+        this.canvas.requestPointerLock();
+      } catch {
+        this.setCaptured(true, false);
+      }
+    }
+    // If the engine never answers (no pointerlockchange at all), fall back rather than freeze.
+    if (typeof window !== 'undefined') {
+      window.setTimeout(() => {
+        if (!this.usingLock && this.active) this.setCaptured(true, false);
+      }, 400);
+    }
+  }
+
+  private lockChanged = (): void => {
+    const owned = typeof document !== 'undefined' && document.pointerLockElement === this.canvas;
+    this.usingLock = owned;
+    if (owned) {
+      this.lockSettledAt = performance.now();
+      this.setCaptured(true, false);
+    } else {
+      // The browser took the cursor back: Escape, an OS switch, a dialog, a drag out of the window.
+      // `setCaptured` notifies the app, which is what makes one Escape press pause the game.
+      this.setCaptured(false, false);
+    }
+  };
+
+  private lockFailed = (): void => {
+    this.usingLock = false;
+    // Locked mode is unavailable — carry on with the cursor-hidden fallback.
+    this.setCaptured(true, false);
+  };
 
   /** Give the cursor back (menu, panel, focus loss). */
   release(): void {
     this.wantCapture = false;
+    if (typeof document !== 'undefined' && document.pointerLockElement === this.canvas) {
+      this.expectUnlock = true;
+      document.exitPointerLock();
+    }
+    this.usingLock = false;
     if (this.locked) this.setCaptured(false, false);
   }
 
   /** The world wants the mouse; the next click into it captures (used right after loading). */
   requestCapture(): void {
     if (!this.locked) this.wantCapture = true;
+  }
+
+  /** Settings: switch between Pointer Lock and the cursor-hidden fallback. */
+  setLockMouse(on: boolean): void {
+    if (this.lockMouse === on) return;
+    this.lockMouse = on;
+    if (!this.active) return;
+    if (on) {
+      this.requestLock();
+      return;
+    }
+    // Turning lock *off* mid-game: give the cursor up first, then take the fallback mode. Doing it
+    // in the other order means the arriving pointerlockchange would unlock the world (and pause it)
+    // right after we handed it to the fallback.
+    if (typeof document !== 'undefined' && document.pointerLockElement === this.canvas) {
+      this.expectUnlock = true; // the upcoming lockchange is ours, not a focus loss
+      document.exitPointerLock();
+      if (typeof window !== 'undefined') window.setTimeout(() => this.setCaptured(true, true), 60);
+    } else {
+      this.setCaptured(true, true);
+    }
+    this.usingLock = false;
   }
 
   private setCaptured(on: boolean, silent: boolean): void {
@@ -283,7 +385,6 @@ export class Input {
     }
     if (changed) this.onLockChange?.(on);
   }
-
   /** Public event seams: `attach()` binds these, and tests/embedders can drive them directly. */
   handleKeyDown(e: KeyboardEvent): void {
     this.keyDown(e);
@@ -363,11 +464,17 @@ export class Input {
     if (this.touch.mine) this.mining = true;
     if (this.touch.place) this.placing = true;
 
-    // Sprint aliases: Ctrl+W (classic), Caps Lock, or double-tap W. On macOS Ctrl+Space is the
-    // system "switch input source" shortcut, so the plain Ctrl combo cannot be the only way.
+    // Sprint aliases, because the classic combo is not portable:
+    //  - Ctrl+W: works on Windows/Linux; on macOS Ctrl+ combos are claimed by the system/browser
+    //    (Ctrl+W can close a tab, and Ctrl+Space is the "select previous input source" shortcut,
+    //    which is why the old Ctrl+Space never reached the game).
+    //  - Alt/Option+W: free on macOS, and safe on Windows because we preventDefault game keys.
+    //  - Caps Lock, and double-tap W: pure page-side state, so they work on every platform.
     const sprint =
       this.isDown('ControlLeft') ||
       this.isDown('ControlRight') ||
+      this.isDown('AltLeft') ||
+      this.isDown('AltRight') ||
       this.capsSprint ||
       this.sprintHold ||
       this.touch.sprint;
@@ -401,6 +508,10 @@ export class Input {
       this.endActions();
       this.sprintHold = false;
       this.release(); // menus need a visible, clickable cursor
+    } else if (this.wantCapture && this.lockMouse && !this.usingLock) {
+      // A key press is a guaranteed user gesture: if the mouse got away while playing, take it back
+      // the moment the player touches the keyboard so WASD can never look dead.
+      this.requestLock();
     }
   }
 }

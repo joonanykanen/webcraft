@@ -44,6 +44,8 @@ export interface Settings {
   ambientVolume: number; // 0..1
   quality: 'fancy' | 'fast'; // AO on/off + greedy meshing
   invertY: boolean;
+  /** Grab the cursor with the Pointer Lock API (default). Off = cursor-hidden fallback. */
+  lockMouse: boolean;
   showHand: boolean;
   fallDamage: boolean; // PH-5 toggleable
   showTouchControls: boolean;
@@ -60,6 +62,7 @@ export const DEFAULT_SETTINGS: Settings = {
   ambientVolume: 0.45,
   quality: 'fancy',
   invertY: false,
+  lockMouse: true,
   showHand: true,
   fallDamage: true,
   showTouchControls: false,

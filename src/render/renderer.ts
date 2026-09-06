@@ -4,7 +4,7 @@
  * pipeline can upload/evict geometry without knowing anything about Three.js.
  */
 import * as THREE from 'three';
-import { ATLAS_PX, ATLAS_TILES, CHUNK_SX, CHUNK_SZ, TILE_PX, clamp } from '../core/constants.js';
+import { ATLAS_PX, ATLAS_TILES, CHUNK_SX, CHUNK_SZ, TILE_PX, clamp, smoothstep } from '../core/constants.js';
 import { dayNightCurve } from '../core/daynight.js';
 import type { MeshData, Settings } from '../core/types.js';
 import type { Chunk } from '../world/chunk.js';
@@ -78,10 +78,12 @@ export class Renderer implements MeshSink {
   private fogOverride: THREE.Color | null = null;
   private renderDistance = 8;
   private crackGeometry: THREE.BufferGeometry;
+  /** Keeps the drawing buffer, the CSS box and the camera aspect in lockstep (see resize()). */
+  private resizeObserver: ResizeObserver | null = null;
   /** The player's arm + held item, drawn in its own pass (VII). */
   readonly hand: HandViewModel;
 
-  constructor(canvas: HTMLCanvasElement, settings: Settings, webgl2: boolean) {
+  constructor(private readonly canvas: HTMLCanvasElement, settings: Settings, webgl2: boolean) {
     this.settings = settings;
     this.webgl2 = webgl2;
     const gl = webgl2 ? 'webgl2' : 'webgl';
@@ -227,7 +229,20 @@ export class Renderer implements MeshSink {
     this.scene.add(this.particles);
 
     this.setRenderDistance(settings.renderDistance);
+    // The camera is built with aspect 1. Sizing it here is not optional: until this ran, a fresh
+    // world rendered with a square projection on a wide window (everything ~75 % too wide) unless
+    // the player happened to resize the window or touch a setting first.
+    this.resize();
+    if (typeof ResizeObserver !== 'undefined') {
+      this.resizeObserver = new ResizeObserver(() => this.resize());
+      this.resizeObserver.observe(this.canvas);
+    }
+    // devicePixelRatio changes with browser zoom and when a window moves to another display; the
+    // ResizeObserver only fires when the CSS box changes, so watch the window as well.
+    window.addEventListener('resize', this.onWindowResize);
   }
+
+  private onWindowResize = (): void => this.resize();
 
   // ------------------------------------------------------------ capability probe
   static probe(): { webgl2: boolean; webgl1: boolean; uintIndex: boolean } {
@@ -339,18 +354,30 @@ export class Renderer implements MeshSink {
     const setHorizon = new THREE.Color(0xff9c51);
 
     this.topColor.copy(nightTop).lerp(dayTop, day);
-    this.horizonColor.copy(nightHorizon).lerp(dayHorizon, day).lerp(setHorizon, sunset * 0.55);
+    // The warm band is deliberately weaker than it looks in isolation: sunrise/sunset sits at
+    // day ≈ 0.5, so a strong lerp here stacked on top of the sky's own brightening and made the
+    // minutes after dawn the brightest of the whole cycle (+25 % over noon), which read as the
+    // world "jumping to late morning" before settling back down.
+    this.horizonColor.copy(nightHorizon).lerp(dayHorizon, day).lerp(setHorizon, sunset * 0.34);
     this.uniforms.uFogColor.value = this.fogOverride ?? this.horizonColor;
     (this.skyMat.uniforms.uSunColor.value as THREE.Color).setHex(0xffe9b0).lerp(new THREE.Color(0xff7a3c), sunset * 0.8);
-    this.skyMat.uniforms.uSunGlow.value = 0.35 + day * 0.75;
+    // Broad halo + tight core, both tied to the sun's own elevation: previously the halo peaked at
+    // 1.1 and washed a ~40-degree patch of sky to white, which read as the world suddenly lighting
+    // up. It now stays a glow around the disc, and cannot fire while the sun is under the horizon.
+    this.skyMat.uniforms.uSunGlow.value = (0.3 + day * 0.5) * smoothstep(-0.22, 0.06, elev);
 
     const sunDir = new THREE.Vector3(Math.cos(angle), elev, 0.28).normalize();
     (this.skyMat.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir);
     const r = this.camera.far * 0.9;
     this.sun.position.copy(sunDir).multiplyScalar(r);
     this.moon.position.copy(sunDir).multiplyScalar(-r);
-    this.sun.visible = elev > -0.25;
-    this.moon.visible = elev < 0.25;
+    // Fade rather than pop: a hard `visible` flip made the disc appear/disappear mid-sky.
+    const sunFade = smoothstep(-0.3, -0.1, elev);
+    const moonFade = 1 - smoothstep(0.1, 0.3, elev);
+    this.sun.visible = sunFade > 0.01;
+    this.moon.visible = moonFade > 0.01;
+    (this.sun.material as THREE.SpriteMaterial).opacity = sunFade;
+    (this.moon.material as THREE.SpriteMaterial).opacity = moonFade;
     const mat = this.stars.material as THREE.PointsMaterial;
     mat.opacity = night * 0.9;
 
@@ -483,12 +510,47 @@ export class Renderer implements MeshSink {
   }
 
   // ------------------------------------------------------------ frame
-  resize(width: number, height: number): void {
-    this.camera.aspect = Math.max(0.2, width / Math.max(1, height));
-    this.camera.updateProjectionMatrix();
-    this.hand.setAspect(this.camera.aspect);
-    this.three.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.webgl2 ? 2 : 1.25));
-    this.three.setSize(width, height, false);
+  /**
+   * The size the browser actually scales the canvas into. Measured from the canvas' own CSS box
+   * rather than `window.innerWidth`: the box is the thing the backing store must match, and it is
+   * the only number that stays correct under future layout changes (letterboxing, panels, Safari's
+   * viewport quirks). Returns 0 when detached/hidden so callers can keep the last good size.
+   */
+  private cssSize(): { w: number; h: number } {
+    const w = this.canvas.clientWidth || this.canvas.getBoundingClientRect().width;
+    const h = this.canvas.clientHeight || this.canvas.getBoundingClientRect().height;
+    if (w >= 1 && h >= 1) return { w: Math.round(w), h: Math.round(h) };
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    return vw >= 1 && vh >= 1 ? { w: vw, h: vh } : { w: 0, h: 0 };
+  }
+
+  /**
+   * `width`/`height` are optional: with no arguments the canvas is measured. Passing them is only a
+   * hint — the aspect always comes from the live box, so a stale caller can never stretch the frame.
+   */
+  resize(width?: number, height?: number): void {
+    const { w, h } = this.cssSize();
+    const useW = w >= 1 ? w : Math.floor(width ?? 0);
+    const useH = h >= 1 ? h : Math.floor(height ?? 0);
+    if (useW < 1 || useH < 1) return; // hidden or mid-layout: keep whatever we had
+    const aspect = useW / useH;
+    if (Math.abs(aspect - this.camera.aspect) > 1e-4) {
+      this.camera.aspect = aspect;
+      this.camera.updateProjectionMatrix();
+      this.hand.setAspect(aspect);
+    }
+    const dpr = Math.min(window.devicePixelRatio || 1, this.webgl2 ? 2 : 1.25);
+    const size = this.three.getSize(new THREE.Vector2());
+    if (Math.abs(size.x - useW) > 0.5 || Math.abs(size.y - useH) > 0.5 || this.three.getPixelRatio() !== dpr) {
+      this.three.setPixelRatio(dpr);
+      this.three.setSize(useW, useH, false);
+    }
+  }
+
+  /** Aspect actually in use, for tests that need to prove the frame is not distorted. */
+  get aspect(): number {
+    return this.camera.aspect;
   }
 
   render(cam: CameraState, dt: number): void {
@@ -553,6 +615,9 @@ export class Renderer implements MeshSink {
   }
 
   dispose(): void {
+    this.resizeObserver?.disconnect();
+    this.resizeObserver = null;
+    window.removeEventListener('resize', this.onWindowResize);
     this.hand.dispose();
     for (const key of [...this.meshes.keys()]) {
       const chunk = { key } as Chunk;
