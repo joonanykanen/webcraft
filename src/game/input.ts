@@ -143,6 +143,13 @@ export class Input {
    * So when we see it we stop using the lock: the cursor-hidden path takes over (which is honest about
    * what it is), and we do not ask for the lock again this session. Detected at runtime rather than
    * sniffed from a user-agent string, since it is a behaviour and not a version.
+   *
+   * STATUS (open): this is one mechanism, and it did NOT resolve the report — the spike persisted in the
+   * affected browser, and Chrome has never shown it. If `lockDriftPx` stays 0 while a player still reports
+   * the spike, the cursor really is pinned and the engine is inflating the counts upstream of anything a
+   * page can observe; that is the point at which the honest fix is to stop using pointer lock on that
+   * engine by default, rather than detecting. README › Known limits carries the full statement and what to
+   * capture next time.
    */
   pointerLockUnreliable = false;
   /** Cursor travel seen while the browser claimed it had the cursor pinned. Feeds the flag above. */
@@ -292,9 +299,9 @@ export class Input {
   private mouseDown = (e: MouseEvent) => {
     // Take the button's default action away from the browser. A press otherwise starts the engine's own
     // text-selection / element-drag session, and in WebKit that session reroutes the mouse stream to drag
-    // handling — the same event-routing change that quietly breaks the pointer-lock cursor pinning
-    // described on `pointerLockUnreliable`. Chrome is unaffected either way, so this costs nothing there
-    // and may be the whole story in Safari.
+    // handling — the same event-routing change that can break the pointer-lock cursor pinning described on
+    // `pointerLockUnreliable`. Kept because a press should not start a browser drag/selection session in a
+    // game view regardless of whether a bug depends on it, but it did NOT resolve the reported spike.
     e.preventDefault();
     if (!this.active) return;
     if (e.button === 0) this.mining = true;

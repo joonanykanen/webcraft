@@ -457,12 +457,16 @@ Three things had to be true before locking could be the default, and all three a
   cursor and pinning it. In some engines a button-held drag hands the mouse stream to the browser's own drag
   machinery, where that pinning and the raw-delta substitution stop applying — and the page is never told,
   because `pointerlockchange` stays quiet and `pointerLockElement` stays set. `movementX` becomes cursor
-  travel with the OS's acceleration curve on it, accumulating, because nothing is recentring any more. That is
-  the report *"it doesn't matter what mouse button I press — RMB, MMB, whatever, even MOUSE4 and 5 — holding it
-  down makes the sensitivity skyrocket"*, and it explains why the buttons' bindings were irrelevant: the
-  trigger is the press, not the action. It also explains why nothing the game did to the numbers helped — **the
-  numbers are the lie, and no ceiling applied to a lie feels right.** So `Input` watches for the one thing that
-  cannot happen under a real lock: the page's own coordinates advancing while the cursor is supposedly pinned.
+  travel with the OS's acceleration curve on it, accumulating, because nothing is recentring any more. That would
+  explain the report — *"it doesn't matter what mouse button I press — RMB, MMB, whatever, even MOUSE4 and 5 — holding it down makes
+  the sensitivity skyrocket"* — including why the buttons' bindings turned out to be irrelevant (the trigger is
+  the press, not the action) and why nothing done to the numbers helped: **no ceiling applied to a lie feels
+  right.** **Status: open.** Neither measure described below changed what the player experiences, and the
+  affected browser's `F3` has not been captured since, so the mechanism above is a guarded hypothesis rather
+  than a confirmed diagnosis. See *Known limits* for what to capture next time; Chrome is the reference for
+  this game's mouse handling.
+
+  So `Input` watches for the one thing that cannot happen under a real lock: the page's own coordinates advancing while the cursor is supposedly pinned.
   A *sustained run* of it (6 consecutive events) means the cursor is running; one large step does not, because
   browsers re-centre the cursor when the lock is granted, modals shift the page's coordinates, and a refocus
   hands the pointer back. On that verdict the game exits pointer lock, **stays in the world instead of pausing**
@@ -518,3 +522,21 @@ unavailable the app says exactly which capability was missing instead of showing
   instead of full auto-step.
 * Mobs do not path-find around obstacles; they walk, jump and bump like the reference game.
 * Worlds are single-player and local; export (`*.webcraft.json`) is the only transfer path.
+* **Pointer-lock look misbehaves in some non-Chrome browsers — open, workaround: play in Chrome.** Reported
+  in Safari on macOS: while *any* mouse button is held — left, right, middle, even the mouse's back/forward
+  buttons — look becomes wildly over-sensitive, and releasing the button puts it back. Chrome has never shown
+  it, and the mouse handling here is tuned against Chrome. The candidate mechanism is that macOS pointer lock
+  is implemented by hiding and pinning the cursor and substituting raw device deltas, and a button-held drag
+  can move the mouse stream onto the browser's drag path, where that substitution stops applying — with the
+  page never told, because `pointerlockchange` stays quiet and `pointerLockElement` stays set. Everything
+  observable from the page then looks correct, down to radians-per-count, which equals the shipped constant by
+  construction; that is why the two mitigations shipped here (`preventDefault()` on the press, so the browser's
+  drag session never begins, and giving up on a lock that lets the cursor drift) changed nothing the player
+  could feel. **The cause is therefore unconfirmed.** Leading explanations left: the engine inflating
+  `movementX` even while it keeps the cursor pinned — invisible from the page, and beyond any clamp we own — or
+  a pointer utility (SteadyMouse, Mos, LinearMouse, Logi Options) treating button-held drags differently. To
+  pick it up again, capture from the misbehaving browser: `F3`'s `lock` row (`pointer lock held · drift 0px`
+  alongside a reported spike means the inflation is upstream of anything observable, and the honest fix is then
+  to not use pointer lock on that engine at all) and the `look` line — a rising `rad/move` proves the events
+  themselves carry more counts. Settings → *Lock mouse while playing* off bypasses the grab entirely and is
+  worth trying, though nobody has tested it against this report.

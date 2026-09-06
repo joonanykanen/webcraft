@@ -362,7 +362,8 @@ export class Menus {
       'On (default): the browser grabs the cursor, so look never runs out — second monitor, ' +
         'holding the mouse button, dragging off the edge. Chrome shows a short "mouse pointer is ' +
         'hidden" notice for it, which can cost one Escape press. Off: nothing is grabbed, so the ' +
-        'cursor stays free to leave the window.',
+        'cursor stays free to leave the window. Known issue: in some non-Chrome browsers look becomes far ' +
+        'too sensitive while any mouse button is held, and Chrome does not — play in Chrome, or turn this off.',
     );
     toggle('showHand', 'Show held item', 'HUD preview of the selected stack.');
     toggle('fallDamage', 'Fall damage', 'Off = long drops are harmless.');
