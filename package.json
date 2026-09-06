@@ -14,6 +14,7 @@
     "test:all": "npm run check && npm run smoke",
     "smoke": "node scripts/smoke.mjs",
     "hero": "node scripts/hero.mjs",
+    "pages:check": "node scripts/pages-check.mjs",
     "check": "tsc --noEmit && vitest run && vite build",
     "verify": "npm run check && npm run smoke"
   },

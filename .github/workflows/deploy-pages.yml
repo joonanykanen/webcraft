@@ -1,0 +1,65 @@
+name: Deploy to GitHub Pages
+
+# The site is the build output, so the deployment *is* `npm run build`: nothing is committed to a
+# gh-pages branch and nothing is uploaded by hand (a dist/ in git rots the moment someone forgets to
+# rebuild). The unit suite runs first because a deploy that fails is better than a deploy that
+# succeeds and loads a broken menu.
+#
+# Requires Settings → Pages → Build and deployment → Source: **GitHub Actions**.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# A push while a deploy is in flight should replace it, not queue behind it.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22 # Vite 7 needs ≥20.19 / ≥22.12
+          cache: npm
+
+      - run: npm ci
+
+      # Same gate as `npm run check`, minus the browser smoke suite: this runner has no Chrome, and
+      # the smoke suite drives the *system* channel by path.
+      - name: Type-check and unit tests
+        run: npx tsc --noEmit && npx vitest run
+
+      # `tsc --noEmit && vite build`. base is './', so the output is portable to /webcraft/ on Pages
+      # as well as to a root-domain host — scripts/pages-check.mjs is what proves that claim.
+      - name: Build
+        run: npm run build
+
+      # Jekyll is not applied to Pages artifacts, but a stray file named `_something` would be
+      # ignored on any path that *is* processed. Costs nothing.
+      - name: Mark the artifact as not-a-Jekyll-site
+        run: touch dist/.nojekyll
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4

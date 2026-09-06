@@ -11,6 +11,9 @@ A voxel sandbox that runs in the browser — no install, no account, no download
 TypeScript + Three.js (WebGL2), procedurally generated everything: terrain, textures,
 icons, sounds. One `npm run dev` and you are punching trees.
 
+**▶ [Play the current `main` in a tab](https://joonanykanen.github.io/webcraft/)** — no install, no
+account, no download. Worlds are saved in your browser and never leave it.
+
 ```
 npm install
 npm run dev        # http://localhost:5173
@@ -554,6 +557,26 @@ unavailable the app says exactly which capability was missing instead of showing
   to not use pointer lock on that engine at all) and the `look` line — a rising `rad/move` proves the events
   themselves carry more counts. Settings → *Lock mouse while playing* off bypasses the grab entirely and is
   worth trying, though nobody has tested it against this report.
+
+---
+
+## Serving it
+
+There is nothing to serve except static files: no server, no API, no accounts. `npm run build` writes
+a self-contained `dist/` — **191 kB gzipped** for the whole game (61 kB app, 117 kB Three.js, 5 kB of
+chunk worker, 5 kB of CSS, 4 kB of HTML) — which can be dropped on any static host.
+
+`base` is `'./'`, so it does not have to sit at the root of a domain. That matters more than it
+sounds: the chunk worker is resolved from `import.meta.url`, and a wrongly-based build fails in the
+worst possible way — the menu appears, the world never arrives, and not one request says why.
+`npm run pages:check` is the guard for exactly that. It copies `dist/` into a nested folder, serves
+it as `http://localhost:4431/webcraft/` the way Pages serves a project site, and *plays* it there:
+entry script and stylesheet resolved under the subpath, worker streaming 177 chunks, renderer
+drawing, and the world surviving a reload on the Pages origin. Seven checks.
+
+Deployment is [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml): on every
+push to `main` it type-checks, runs the unit suite, builds and publishes `dist/` as a Pages artifact.
+Nothing build-generated is committed, and nothing is deployed by hand.
 
 ---
 
