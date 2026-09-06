@@ -176,7 +176,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 219 vitest tests (14 files, ~11 s, Node environment)
+npm run test         # 221 vitest tests (14 files, ~11 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -423,6 +423,21 @@ because opening devtools takes the mouse away from the page, which is the thing 
 
 Wiggle the mouse the same way with no button held, then with one held, and read `ratio`:
 
+The rows lead with `ct/ev` — how much movement one event carried — and `lk locked/unlocked`, how many of
+those events arrived while the pointer was genuinely locked. Both matter more than `rad/ct`, and the reason
+is a lesson about diagnostics: `rad/ct` is `LOOK_PER_PIXEL × sensitivity` *by construction*, so on its own it
+can only ever report that our own maths is symmetric. It cannot see the other hypothesis at all — a browser
+handing us accelerated cursor travel instead of device counts, which arrives with the same ratio and a much
+larger `ct`. An early version of this table led with `rad/ct`, and a real report came back looking like
+nothing was wrong.
+
+`drift` is the counter built for that case. Under a real pointer lock the cursor cannot move, so the page's
+own coordinates must sit still while device counts keep flowing; travel recorded while we believe the cursor
+is pinned means the browser granted the lock and let the pointer run anyway, and then the deltas are
+accelerated cursor travel. Reporting only a *sustained run* of it: browsers re-centre the cursor when the
+lock is granted, and a single large step is that, not a fake lock (the first version of this counted it as
+one, and the smoke run caught it crying wolf on exactly the measurement it exists to make).
+
 | reading | meaning |
 | --- | --- |
 | `ratio ≈ 1`, `held` has far more `ct` than `events` would suggest | the events themselves got bigger — OS/browser acceleration during drags. The fix is a compensation (`F8` proves it, `adaptive` fixes it) |
@@ -442,6 +457,13 @@ all: if the spike survives `raw`, nothing we do to the numbers is responsible). 
 *only while a button is held* (1 → ×0.5 → ×0.34 → ×1.5): if a low value makes the spike disappear, the deltas
 themselves are the problem and the fix is a compensation rather than a clamp. **`F9`** zeroes the counters. Both announce themselves as a
 toast, and `probe mode` / `drag×` on F3 always show the current state, so a screenshot carries it.
+
+Alongside the measuring, two things now happen that can fix it without knowing which mechanism is at fault:
+the lock is requested with `unadjustedMovement` (raw device deltas where the browser offers them, so OS
+acceleration cannot ride along; browsers that reject the option fall back to the plain request), and a lock
+that vanishes within a moment of a button press is re-requested once, bounded to four attempts and standing
+down the moment the app pauses — Escape still unlocks, and a pause screen must keep its cursor. `regrab` and
+`frame-cap` on the probe row report both.
 
 For the console: `webcraft.lookStats(true)` returns the whole structure (and zeroes the windows for a clean
 A/B), `webcraft.setLookMode('adaptive')` and `webcraft.setDragComp(0.34)` set the dials directly.

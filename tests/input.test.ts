@@ -446,6 +446,37 @@ describe('button-held look probe (BI-2)', () => {
     expect(input.radPerCount('held')).toBeLessThan(input.lookStats.held.counts * LOOK_PER_PIXEL);
   });
 
+  it('flags movement that arrives while the pointer is only pretending to be locked', () => {
+    // The reading that matters once our own maths is ruled out: under a real lock the cursor cannot move,
+    // so the page's own coordinates sit still while device counts keep flowing. If clientX/Y drifts while
+    // we believe we are locked, the "device counts" are really accelerated cursor travel — and that feels
+    // like the sensitivity skyrocketing, exactly as reported, with nothing wrong in our look code.
+    const input = captured();
+    input.usingLock = true;
+    input.handleMouseMove(move({ mx: 6, my: 0, cx: 500, cy: 300, t: 10 }));
+    input.handleMouseMove(move({ mx: 6, my: 0, cx: 500, cy: 300, t: 11 }));
+    expect(input.lookStats.free.driftEvents).toBe(0);
+    // One big step is a re-centre, not a fake lock, so it must not be reported on its own.
+    input.handleMouseMove(move({ mx: 60, my: 0, cx: 640, cy: 300, t: 12 }));
+    expect(input.lookStats.free.driftEvents).toBe(0);
+    // The cursor running keeps producing travel event after event; that is the thing worth reporting.
+    for (let i = 0; i < 5; i++) input.handleMouseMove(move({ mx: 55, my: 0, cx: 700 + i * 55, cy: 300, t: 20 + i }));
+    expect(input.lookStats.free.driftEvents).toBeGreaterThanOrEqual(3);
+    expect(input.lookStats.free.driftPx).toBeGreaterThan(0);
+  });
+
+  it('separates events that arrived under lock from those that did not', () => {
+    // `movement / clientXY` on F3 cannot tell a real lock from a browser that reports movement anyway, so
+    // the capture state is recorded per event and per button state.
+    const input = captured(); // no document in Node: captured through the cursor-hidden fallback
+    expect(input.usingLock).toBe(false);
+    input.handleMouseMove(move({ mx: 3, t: 1 }));
+    input.usingLock = true;
+    input.handleMouseMove(move({ mx: 3, t: 2 }));
+    expect(input.lookStats.free.eventsUnlocked).toBe(1);
+    expect(input.lookStats.free.eventsLocked).toBe(1);
+  });
+
   it('resets without disturbing the session totals that other diagnostics depend on', () => {
     const input = captured();
     input.handleMouseMove(move({ mx: 5, my: 0, buttons: 1, t: 7 }));

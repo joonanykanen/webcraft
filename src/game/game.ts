@@ -19,6 +19,7 @@ import {
   clamp,
 } from '../core/constants.js';
 import { DayClock, dayNightCurve } from '../core/daynight.js';
+import type { LookWindow } from '../game/input.js';
 import { BIOME_NAMES, type GameMode, type SaveData, type Settings, type Slot, type Vec3, type WorldRecord } from '../core/types.js';
 import { mulberry32 } from '../core/rng.js';
 import type { AudioBus } from '../audio/audio.js';
@@ -527,12 +528,22 @@ export class Game implements EntityHost {
     const st = this.input.lookStats;
     const line = (
       state: 'free' | 'held',
-      w: { events: number; counts: number; rad: number; rejected: number; discarded: number },
+      w: LookWindow,
       ratio?: string,
     ) =>
       // The F3 key column already names the state, so the value does not repeat it (the line has to fit).
-      `${w.events} ev · ${Math.round(w.counts)} ct · ${w.rad.toFixed(1)} req · ` +
-      `${this.input.radPerCount(state).toFixed(5)} rad/ct · rej ${w.rejected}` +
+      //
+      // `ct/ev` is the headline, not `rad/ct`: rad/ct comes out at LOOK_PER_PIXEL x sensitivity by
+      // construction, so it can only ever show that *our* maths is identical in both states — useful for
+      // ruling that out, useless for the other hypothesis. What changes when a browser swaps device
+      // counts for accelerated cursor travel is how much movement one event carries, so that is what each
+      // row leads with. `lk` is how many of those events arrived while the pointer was actually locked,
+      // and `drift` is cursor travel recorded while we believed it was pinned: a fake lock.
+      `${w.events} ev · ${Math.round(w.counts)} ct · ${(w.counts / Math.max(1, w.events)).toFixed(2)} ct/ev · ` +
+      `${w.rad.toFixed(1)} req · ${this.input.radPerCount(state).toFixed(5)} rad/ct · ` +
+      `lk ${w.eventsLocked}/${w.eventsUnlocked}` +
+      (w.driftEvents ? ` · drift ${w.driftEvents}ev ${Math.round(w.driftPx)}px` : '') +
+      ` · rej ${w.rejected}` +
       // Events measured but thrown away because the world did not own the mouse. Worth a row of its own:
       // "held has counts but no rad" is the fingerprint of losing capture mid-drag, and a row that only
       // appears in the broken state is worse than no row — so it is appended only when it happens.
@@ -547,6 +558,7 @@ export class Game implements EntityHost {
       lookProbe:
         `mode ${this.input.lookMode} · drag×${this.input.dragComp.toFixed(2)} · dup ${st.dupEvents} · max ${st.maxPerFrame}/frame` +
         ` · settle-drop ${st.settleDropped} · lock Δ${st.lockChanges} (${st.lockChangesWhileHeld} after press)` +
+        ` · regrab ${this.input.regrabAttempts} · frame-cap ${this.input.framesClamped}` +
         ` · buttons ${st.buttons} · free median ${this.input.freeMedian().toFixed(0)} ct · F7 mode · F8 drag×`,
     };
   }
@@ -559,10 +571,13 @@ export class Game implements EntityHost {
     // Per *event*, not per pixel: an event can carry any number of pixels. What makes this line worth
     // reading is the ratio between sources — `drag` must stay 0 under a mouse, and a doubled look input
     // would show up as the mouse total jumping relative to how much the cursor actually moved.
+    // Every source is printed, including the ones that should be zero under a mouse. Printing only the
+    // non-zero ones once made a second look path unfindable: "not shown" and "measured as zero" have to
+    // be distinguishable, or the line cannot answer the one question it exists for.
     const totals =
       `mouse ${this.input.movesSeen} moves · ${s.mouse.toFixed(1)} rad (${this.input.radPerMove().toFixed(2)}/move)` +
       ` · ${this.input.movesFromMovement} movement / ${this.input.movesFromClient} clientXY` +
-      ` · drag ${s.touchDrag.toFixed(1)} rad`;
+      ` · drag ${s.touchDrag.toFixed(1)} · pad ${s.gamepad.toFixed(1)} · ui ${s.ui.toFixed(1)} rad`;
     if (t < 1e-6) return `idle · ${totals}`;
     const parts = [`mouse ${m.mouse.toFixed(3)}`];
     if (m.touchDrag) parts.push(`touchDrag ${m.touchDrag.toFixed(3)}`);

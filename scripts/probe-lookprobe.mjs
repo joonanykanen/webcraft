@@ -77,6 +77,36 @@ const lines = await page.evaluate(async () => {
 console.log('\nF3 rows:');
 for (const [k, v] of Object.entries(lines)) console.log(`  ${k.padEnd(5)} ${v}`);
 
+// The headline number has to be per-event magnitude, not rad/ct: rad/ct is the shipped constant by
+// construction, so it can prove our maths is symmetric but can never see a browser handing us accelerated
+// cursor travel instead of device counts.
+const fmt = await page.evaluate(() => {
+  const m = window.webcraft.game.hudModel();
+  return { held: m.lookHeld, mix: m.look };
+});
+console.log(`\nrows: ${fmt.held}`);
+console.log(`mix:  ${fmt.mix}`);
+const formatsOk = /[0-9]+\.[0-9]{2} ct\/ev/.test(fmt.held) && /pad [0-9.]+/.test(fmt.mix) && /ui [0-9.]+/.test(fmt.mix);
+
+// Fake-lock detector: claim the lock is held, then move the page's own cursor. A real lock pins it.
+const fake = await page.evaluate(() => {
+  const g = window.webcraft.game;
+  g.input.resetLookStats();
+  g.input.usingLock = true;
+  let x = 300;
+  for (let i = 0; i < 6; i++) {
+    x += 55;
+    const e = new MouseEvent('mousemove', { clientX: x, clientY: 320, buttons: 1, bubbles: true });
+    window.dispatchEvent(e); // no movementX: a browser that faked the lock reports travel, not counts
+  }
+  g.input.usingLock = false;
+  const m = g.hudModel();
+  const st = g.input.lookStats.held;
+  return { row: m.lookHeld, events: st.events, drift: st.driftEvents, px: Math.round(st.driftPx) };
+});
+console.log(`fake lock: ${fake.drift ? 'DETECTED' : 'MISSED'} — ${fake.drift}/${fake.events} events, ${fake.px}px of cursor travel`);
+console.log(`           ${fake.row}`);
+
 // Losing capture mid-drag is one of the candidate mechanisms, so prove the row that reports it appears.
 await page.evaluate(() => {
   const g = window.webcraft.game;
@@ -98,7 +128,13 @@ await page.keyboard.press('F3');
 await page.waitForTimeout(400);
 const dom = await page.evaluate(() => {
   const text = document.getElementById('debug')?.textContent ?? '';
-  return { hasFree: text.includes('rad/ct'), hasHeld: text.includes('ratio'), hasProbe: text.includes('F7 mode'), visible: !!document.getElementById('debug')?.offsetHeight };
+  // 'ratio' only appears once both states have data, so the DOM check uses fields that are always printed.
+  return {
+    hasFree: text.includes('rad/ct'),
+    hasHeld: text.includes('lk ') && text.includes('ct/ev'),
+    hasProbe: text.includes('F7 mode') && text.includes('regrab'),
+    visible: !!document.getElementById('debug')?.offsetHeight,
+  };
 });
 console.log('\nF3 overlay contains the new rows:', JSON.stringify(dom));
 await page.screenshot({ path: 'smoke/lookprobe-f3.png', clip: { x: 0, y: 0, width: 1000, height: 320 } });
@@ -140,6 +176,9 @@ const problems = [
   ...(!dials.out.some((l) => l.includes('mode adaptive')) ? ['F7 did not reach adaptive'] : []),
   ...(!dials.out.some((l) => l.includes('drag×0.5')) ? ['F8 did not reach 0.5'] : []),
   ...(lost.includes('no-capture') ? [] : ['capture loss mid-drag is not reported on F3']),
+  ...(formatsOk ? [] : ['rows do not lead with per-event magnitude / all four look sources']),
+  // A sustained run is required (a single step is a re-centre), so the report lands on events 3..6.
+  ...(fake.drift >= 3 && /drift/.test(fake.row) ? [] : [`fake lock not reported (${fake.drift}/6, row: ${fake.row})`]),
   ...(!dials.out.some((l) => l.startsWith('F9') && l.includes('ev 0 ')) ? ['F9 did not clear the counters'] : []),
 ];
 console.log(problems.length ? '\nPROBLEMS:\n  ' + problems.join('\n  ') : '\nprobe clean');

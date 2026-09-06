@@ -34,6 +34,14 @@ export const LOCK_SETTLE_MS = 150;
  * another monitor), not the player moving the mouse. */
 export const MAX_CLIENT_JUMP = 260;
 /**
+ * Cursor travel, in CSS px, that still counts as "the cursor is pinned" under pointer lock. Under a real
+ * lock the pointer cannot move, so this stays at 0-1 (browsers occasionally re-report the same position a
+ * pixel off). Anything beyond it while we believe we are locked means the browser is letting the cursor
+ * run, and `movementX` is then accelerated cursor travel rather than device counts — see Input's fake-lock
+ * detector and the `drift` figure on F3.
+ */
+export const LOCK_DRIFT_PX = 3;
+/**
  * One frame may never turn the camera more than this (radians, ~29 degrees — 1 700 deg/s at 60 FPS).
  * `MAX_LOOK_PER_EVENT` guards a single event; this guards the *sum* of everything that arrived between
  * two frames, which is the number that decides what the player actually sees. It exists because the

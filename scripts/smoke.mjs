@@ -439,6 +439,71 @@ async function main() {
       return `free ${free.radPerPx.toFixed(5)} vs held ${held.radPerPx.toFixed(5)} rad/px (ratio ${ratio.toFixed(2)}), touchDrag 0`;
     });
 
+    // The report we cannot reproduce here: "it doesn't matter what mouse button I press — RMB, MMB, even
+    // MOUSE4/5 — holding it down makes the sensitivity skyrocket". Build for that ships three F3 rows that
+    // split look by button state, because a headless browser has no real device, no OS acceleration curve
+    // and no pointer that can be lied to. Those rows are the only thing standing between the next report
+    // and another round of guessing, so they are tested like product: present, carrying per-event magnitude
+    // (rad/ct is LOOK_PER_PIXEL x sensitivity by construction, so on its own it would show nothing), and
+    // agreeing with the shipped constant on a stream whose shape we control exactly.
+    await step('F3 look rows measure per-event magnitude and agree with the look constant (BI-2)', async () => {
+      const r = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const yaw0 = g.player.yaw;
+        const pitch0 = g.player.pitch;
+        g.input.resetLookStats();
+        g.input.setActive(true);
+        // Equal feeds in both button states: identical events, so identical per-event magnitude, so the
+        // ratio between the states must be 1. Anything else and the split is lying.
+        const feed = async (n, buttons) => {
+          for (let i = 0; i < n; i++) {
+            const e = new MouseEvent('mousemove', { clientX: 400, clientY: 300, buttons, bubbles: true });
+            Object.defineProperty(e, 'movementX', { value: 20 });
+            Object.defineProperty(e, 'movementY', { value: 0 });
+            window.dispatchEvent(e);
+            await new Promise((res) => requestAnimationFrame(res)); // one event per frame: no frame ceiling
+          }
+        };
+        await feed(20, 0);
+        await feed(20, 1);
+        const m = g.hudModel();
+        const out = {
+          free: m.lookFree,
+          held: m.lookHeld,
+          probe: m.lookProbe,
+          mix: m.look,
+          events: g.input.lookStats.held.events,
+          freeEvents: g.input.lookStats.free.events,
+          ratio: g.input.radPerCount('held') / Math.max(1e-9, g.input.radPerCount('free')),
+          ctPerEv: g.input.lookStats.held.counts / Math.max(1, g.input.lookStats.held.events),
+          radPerCt: g.input.radPerCount('held'),
+          sens: g.input.sensitivity,
+          drift: g.input.lookStats.held.driftEvents,
+        };
+        g.player.yaw = yaw0;
+        g.player.pitch = pitch0;
+        g.input.resetLookStats();
+        return out;
+      });
+      if (r.events !== 20 || r.freeEvents !== 20) throw new Error(`rows lost events: held=${r.events} free=${r.freeEvents}, fed 20 each`);
+      if (Math.abs(r.ratio - 1) > 0.001) throw new Error(`identical feeds came out ${r.ratio.toFixed(3)}x apart — the state split is not honest`);
+      if (Math.abs(r.ctPerEv - 20) > 0.01)
+        throw new Error(`per-event magnitude read wrong: ${r.ctPerEv} ct/ev for a stream of 20-count events`);
+      const expected = 0.0176 * r.sens;
+      if (Math.abs(r.radPerCt - expected) / expected > 0.02)
+        throw new Error(`rad/ct is ${r.radPerCt}, expected ${expected} (LOOK_PER_PIXEL x sensitivity ${r.sens})`);
+      if (!/[0-9]+\.[0-9]{2} ct\/ev/.test(r.held)) throw new Error('held row has no per-event magnitude: ' + r.held);
+      if (!/ratio [0-9.]+x/.test(r.held)) throw new Error('held row has no free-vs-held ratio: ' + r.held);
+      if (!/lk [0-9]+\/[0-9]+/.test(r.held)) throw new Error('held row does not report capture state: ' + r.held);
+      if (!/mode [a-z]+/.test(r.probe) || !/regrab [0-9]+/.test(r.probe) || !/frame-cap [0-9]+/.test(r.probe))
+        throw new Error('probe row is missing mode/regrab/frame-cap: ' + r.probe);
+      if (!/drag [0-9.]+ · pad [0-9.]+ · ui [0-9.]+ rad/.test(r.mix))
+        throw new Error('look line does not show all four sources (a second look path must not be able to hide): ' + r.mix);
+      if (r.drift > 0)
+        throw new Error(`the cursor drifted while pointer lock was held: ${r.drift} events (browser is faking the lock)`);
+      return `20 events x 20 ct -> ${r.radPerCt.toFixed(5)} rad/ct (expected ${expected.toFixed(5)}), rows + ratio + capture split present`;
+    });
+
     const st = await page.evaluate(() => {
       const g = window.webcraft.game;
       return {

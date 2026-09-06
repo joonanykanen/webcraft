@@ -5,6 +5,7 @@ import {
   MAX_CLIENT_JUMP,
   MAX_LOOK_PER_EVENT,
   MAX_LOOK_PER_FRAME,
+  LOCK_DRIFT_PX
 } from '../core/constants.js';
 
 export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
@@ -37,6 +38,21 @@ export interface LookWindow {
    * recorded nothing in that state would make the bug look absent.
    */
   discarded: number;
+  /** events that arrived while we genuinely held pointer lock, vs while we did not */
+  eventsLocked: number;
+  eventsUnlocked: number;
+  /**
+   * *Fake-lock* detector — the counter that matters most now.
+   *
+   * Under a real pointer lock the cursor cannot move, so `clientX/clientY` must sit still while
+   * `movementX/Y` keeps flowing. If the page's own coordinates drift while we believe we are locked, the
+   * browser is granting the lock but letting the cursor run — and then `movementX` is really accelerated
+   * cursor travel, which is exactly "the mouse becomes far too sensitive", and no amount of clamping on
+   * our side makes it feel right. Recorded per button state, because the report is about button-held
+   * drags.
+   */
+  driftEvents: number;
+  driftPx: number;
 }
 
 export interface LookStats {
@@ -55,7 +71,17 @@ export interface LookStats {
   buttons: number;
 }
 
-const emptyWindow = (): LookWindow => ({ events: 0, counts: 0, rad: 0, rejected: 0, discarded: 0 });
+const emptyWindow = (): LookWindow => ({
+  events: 0,
+  counts: 0,
+  rad: 0,
+  rejected: 0,
+  discarded: 0,
+  eventsLocked: 0,
+  eventsUnlocked: 0,
+  driftEvents: 0,
+  driftPx: 0,
+});
 
 export function newLookStats(): LookStats {
   return {
@@ -193,6 +219,8 @@ export class Input {
    * compensation, not a clamp. */
   dragComp = 1;
   private freeMag: number[] = [];
+  /** Consecutive events that carried cursor travel while we believed the pointer was pinned. */
+  private driftRun = 0;
   private seenEvents = new WeakSet<object>();
   private pressTimes: number[] = [0, 0, 0, 0, 0];
   private lastPressAt = -1e12;
@@ -398,6 +426,27 @@ export class Input {
     if (this.seenEvents.has(e)) this.lookStats.dupEvents++;
     else this.seenEvents.add(e);
 
+    const travel = this.hasLast ? Math.abs(e.clientX - this.lastX) + Math.abs(e.clientY - this.lastY) : 0;
+    if (this.usingLock && performance.now() - this.lockSettledAt > LOCK_SETTLE_MS) {
+      // A *sustained* run of travel is what a fake lock looks like. One jump is not: browsers re-centre the
+      // cursor when the lock is granted, a modal can change the page's coordinates, and a refocus hands the
+      // pointer back — all of which arrive as a single large step. Counting those as drift would make this
+      // detector cry wolf on the exact measurement it exists to make.
+      if (travel > LOCK_DRIFT_PX) {
+        this.driftRun++;
+        if (this.driftRun >= 3) {
+          win.driftEvents++;
+          win.driftPx += travel;
+        }
+      } else {
+        this.driftRun = 0;
+      }
+    } else {
+      this.driftRun = 0;
+    }
+    if (this.usingLock) win.eventsLocked++;
+    else win.eventsUnlocked++;
+
     this.lastX = e.clientX;
     this.lastY = e.clientY;
     this.hasLast = true;
@@ -486,6 +535,40 @@ export class Input {
     this.eventsThisFrame = 0;
   }
 
+  /**
+   * Re-request the mouse after losing it, but only in the narrow case that explains this bug: the lock
+   * vanished within a moment of a button press while the world was still playing. That is what a browser
+   * doing native drag/selection on mousedown looks like, and staying on the cursor-hidden path for the
+   * rest of a drag is how a press ends up making the mouse feel wild. Bounded, so it can never fight the
+   * user: Escape deliberately unlocks (pause opens, `active` goes false) and is not chased.
+   */
+  regrabAttempts = 0;
+  private regrabTimer: ReturnType<typeof setTimeout> | null = null;
+  private maybeRegrab(): void {
+    if (typeof document === 'undefined' || !this.canvas || !this.active) return;
+    if (this.locked || document.pointerLockElement) return;
+    if (performance.now() - this.lastPressAt > 600) return;
+    if (this.regrabAttempts >= 4) return;
+    this.regrabAttempts++;
+    if (this.regrabTimer) clearTimeout(this.regrabTimer);
+    this.regrabTimer = setTimeout(() => {
+      this.regrabTimer = null;
+      if (!this.active || this.locked || !this.canvas) return;
+      try {
+        const req = this.canvas.requestPointerLock({ unadjustedMovement: true }) as unknown as
+          | Promise<void>
+          | undefined;
+        if (req && typeof req.catch === 'function') req.catch(() => this.canvas?.requestPointerLock());
+      } catch {
+        try {
+          this.canvas.requestPointerLock();
+        } catch {
+          /* stay on the fallback; the watchdog will keep the mouse usable */
+        }
+      }
+    }, 120);
+  }
+
   /** Press counts per mouse button index, and how often losing the mouse happened mid-drag. */
   pressCount(button: number): number {
     return this.pressTimes[button] ?? 0;
@@ -559,6 +642,10 @@ export class Input {
       // The browser took the cursor back: Escape, an OS switch, a dialog, a drag out of the window.
       // `setCaptured` notifies the app, which is what makes one Escape press pause the game.
       this.setCaptured(false, false);
+      // Last on purpose: if the app chose to pause, `active` is false by now and this does nothing. It
+      // only fires for a blip the app did not treat as a reason to pause, which is the case that would
+      // otherwise leave the rest of the drag on the accelerated cursor path.
+      this.maybeRegrab();
     }
   };
 
