@@ -13,6 +13,8 @@ export class Inventory {
   creative = false;
   /** bumped on every mutation so the UI can refresh cheaply */
   version = 0;
+  /** UI-6: called whenever items actually land in a slot (drops, crafting output, ...) */
+  onObtain: ((id: number, count: number) => void) | null = null;
 
   get hotbar(): Slot[] {
     return this.main.slice(0, HOTBAR_SLOTS);
@@ -49,7 +51,10 @@ export class Inventory {
       this.main[i] = { id, count: take, durabilityLeft: tool ? (durabilityLeft ?? tool.durability) : undefined };
       left -= take;
     }
-    if (left !== count) this.version++;
+    if (left !== count) {
+      this.version++;
+      this.onObtain?.(id, count - left);
+    }
     return left;
   }
 

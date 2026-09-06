@@ -629,32 +629,6 @@ ul.keys {
   filter: drop-shadow(1px 1px 0 rgba(0, 0, 0, 0.7));
 }
 
-/* shown while the game wants the pointer but the browser will not hand it over without a click */
-#lock-hint {
-  position: absolute;
-  left: 50%;
-  top: 58%;
-  transform: translateX(-50%);
-  padding: 7px 14px;
-  border-radius: 999px;
-  background: rgba(8, 12, 20, 0.74);
-  border: 1px solid rgba(122, 174, 255, 0.45);
-  color: #dceaff;
-  font: 600 13px/1 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
-  letter-spacing: 0.01em;
-  animation: hint-pulse 2.4s ease-in-out infinite;
-  pointer-events: none;
-}
-@keyframes hint-pulse {
-  0%,
-  100% {
-    opacity: 0.72;
-  }
-  50% {
-    opacity: 1;
-  }
-}
-
 #debug {
   position: absolute;
   left: 8px;
@@ -768,36 +742,6 @@ ul.keys {
 }
 .touch-btn.active {
   background: rgba(123, 179, 74, 0.6);
-}
-
-/* ---------------- tutorial ---------------- */
-#tutorial {
-  position: absolute;
-  inset: 0;
-  display: flex;
-  align-items: flex-end;
-  justify-content: center;
-  padding-bottom: 8vh;
-  pointer-events: none;
-}
-#tutorial-card {
-  pointer-events: auto;
-  max-width: 520px;
-  background: rgba(14, 20, 29, 0.94);
-  border: 1px solid var(--accent-dim);
-  border-radius: 12px;
-  padding: 1rem 1.2rem;
-  box-shadow: var(--shadow);
-}
-#tutorial-card h2 {
-  margin: 0 0 0.35rem;
-  font-size: 1.15rem;
-  color: var(--accent);
-}
-#tutorial-card p {
-  margin: 0;
-  line-height: 1.55;
-  color: #dbe6f5;
 }
 
 /* ---------------- inventory / crafting panels ---------------- */
@@ -1009,4 +953,131 @@ ul.keys {
 }
 .slot.tool canvas {
   filter: drop-shadow(0 0 3px rgba(255, 220, 140, 0.35));
+}
+
+/* ======================= mouse capture (PH-1, no Pointer Lock API) ======================= */
+/* While the world owns the mouse the cursor is simply hidden — no browser banner, and Escape
+   always reaches the page, so one press pauses and one press resumes. */
+body.mouse-captured,
+body.mouse-captured * {
+  cursor: none !important;
+}
+
+/* ======================= milestone tracker (UI-6) ======================= */
+#milestone-tracker {
+  position: absolute;
+  left: 16px;
+  bottom: 96px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  max-width: min(340px, 40vw);
+  padding: 8px 12px 8px 9px;
+  border-radius: 12px;
+  background: rgba(8, 12, 20, 0.62);
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  box-shadow: 0 2px 10px rgba(0, 0, 0, 0.35);
+  pointer-events: none;
+}
+#milestone-tracker .milestone-icon {
+  width: 32px;
+  height: 32px;
+  image-rendering: pixelated;
+  flex: 0 0 auto;
+}
+#milestone-tracker .milestone-label {
+  font: 700 9.5px/1 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--gold, #ffcc33);
+  opacity: 0.9;
+}
+#milestone-tracker .milestone-title {
+  margin-top: 3px;
+  font: 700 14px/1.15 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
+  color: #eaf2ff;
+  text-shadow: 1px 1px 0 rgba(0, 0, 0, 0.7);
+}
+#milestone-tracker .milestone-goal {
+  margin-top: 2px;
+  font: 500 11.5px/1.3 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
+  color: #a9bdd6;
+}
+#milestone-tracker.bump {
+  animation: milestone-pop 0.55s ease-out;
+}
+@keyframes milestone-pop {
+  0% {
+    transform: scale(0.86) translateY(8px);
+    border-color: var(--gold, #ffcc33);
+  }
+  60% {
+    transform: scale(1.04);
+    border-color: var(--gold, #ffcc33);
+  }
+  100% {
+    transform: scale(1);
+  }
+}
+
+/* ======================= milestone panel (UI-6) ======================= */
+#milestones-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(280px, 1fr));
+  gap: 10px;
+  margin-top: 8px;
+  max-height: 62vh;
+  overflow-y: auto;
+  padding-right: 4px;
+}
+.ms-card {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 9px 11px;
+  border-radius: 10px;
+  background: linear-gradient(180deg, rgba(48, 60, 79, 0.75), rgba(26, 34, 46, 0.75));
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.12));
+  transition: border-color 0.15s ease, transform 0.15s ease;
+}
+.ms-card.unlocked {
+  border-color: var(--gold, #ffcc33);
+  background: linear-gradient(180deg, rgba(74, 66, 34, 0.7), rgba(30, 28, 20, 0.8));
+}
+.ms-card.available {
+  border-color: var(--accent, #7ab1ff);
+}
+.ms-card.locked {
+  opacity: 0.55;
+}
+.ms-icon {
+  width: 40px;
+  height: 40px;
+  image-rendering: pixelated;
+  flex: 0 0 auto;
+}
+.ms-text {
+  min-width: 0;
+}
+.ms-title {
+  font: 700 13.5px/1.2 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
+  color: #f2f6ff;
+}
+.ms-card.unlocked .ms-title {
+  color: var(--gold, #ffcc33);
+}
+.ms-body {
+  margin-top: 2px;
+  font: 500 11.5px/1.35 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
+  color: #b7c6da;
+}
+.ms-goal {
+  margin-top: 3px;
+  font: 700 10.5px/1 var(--font-stack, ui-sans-serif, system-ui, sans-serif);
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--accent, #7ab1ff);
+}
+.ms-card.unlocked .ms-goal {
+  color: var(--good, #7bb34a);
 }

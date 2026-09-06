@@ -1,9 +1,10 @@
-/** Menus, world list, settings, pause/death panels, tutorial overlay & touch controls (MM-1 … MM-5, UI-4, UI-6). */
+/** Menus, world list, settings, pause/death panels, milestone panel & touch controls (MM-1 … MM-5, UI-4, UI-6). */
 import { clamp } from '../core/constants.js';
 import { DEFAULT_SETTINGS, type Settings, type WorldRecord } from '../core/types.js';
 import { seedFromString } from '../core/rng.js';
 import type { LoadResult } from '../save/idb.js';
-import type { Game, TutorialEvent } from '../game/game.js';
+import type { Game } from '../game/game.js';
+import { paintItem } from './icons.js';
 import { clockTime } from './hud.js';
 
 export type ScreenName =
@@ -18,6 +19,7 @@ export type ScreenName =
   | 'death'
   | 'inventory'
   | 'chest'
+  | 'milestones'
   | 'none';
 
 export interface MenuCallbacks {
@@ -50,39 +52,10 @@ const SCREEN_IDS: Record<ScreenName, string | null> = {
   death: 'screen-death',
   inventory: 'panel-inventory',
   chest: 'panel-chest',
+  milestones: 'screen-milestones',
   none: null,
 };
 
-const TUTORIAL: Record<TutorialEvent | 'intro', { title: string; body: string }> = {
-  intro: {
-    title: 'Welcome to WebCraft',
-    body: 'You spawned with nothing. Hold left mouse on a tree to punch logs, then press E to open the inventory and turn them into planks and sticks.',
-  },
-  firstBlock: {
-    title: 'Gathering',
-    body: 'Logs become planks in the crafting grid. Craft a crafting table (4 planks) and place it — opening the inventory near a table unlocks the 3×3 grid.',
-  },
-  firstTool: {
-    title: 'Tools',
-    body: 'A wooden pickaxe breaks stone (which drops cobblestone). Better tools mine faster and unlock harder ores: stone → iron → gold → gem.',
-  },
-  firstCraft: {
-    title: 'Crafting',
-    body: 'The recipe book on the right crafts anything you have materials for — greyed-out recipes are missing ingredients. Manual crafting in the grid always works too.',
-  },
-  firstPlace: {
-    title: 'Building',
-    body: 'Left-click breaks, right-click places, Q drops the held stack. Hold Shift to sneak so you cannot walk off ledges while building.',
-  },
-  firstNight: {
-    title: 'Night is coming',
-    body: 'Hostiles spawn where it is dark. Craft torches (coal + stick) to light your base, or wall yourself in and wait — a full day cycle takes 10 minutes.',
-  },
-  surviveNight: {
-    title: 'You survived the night',
-    body: 'Hunger drains while running and jumping — eat meat or apples. Breath runs out underwater, and sand & gravel fall when you dig out their support. Bedrock at y=5 is unbreakable: dig up, not down.',
-  },
-};
 
 function el<T extends HTMLElement>(id: string): T {
   const e = document.getElementById(id);
@@ -99,15 +72,9 @@ export class Menus {
   private returnTo: ScreenName = 'main';
   private settings: Settings;
   private game: Game | null = null;
-  private tutorialBox = el<HTMLElement>('tutorial');
-  private cardTitle = el<HTMLElement>('tutorial-title');
-  private cardBody = el<HTMLElement>('tutorial-body');
   private loadBar = el<HTMLElement>('load-bar');
   private loadStatus = el<HTMLElement>('load-status');
   private worldList = el<HTMLElement>('world-list');
-  private tutorialQueue: TutorialEvent[] = [];
-  private tutorialActive: TutorialEvent | 'intro' | null = null;
-  private tutorialTimer = 0;
   private modeChoice: 'survival' | 'creative' = 'survival';
   private stick = el<HTMLElement>('stick');
   private knob = el<HTMLElement>('stick-knob');
@@ -126,7 +93,10 @@ export class Menus {
 
   // ------------------------------------------------------------ screen stack
   show(name: ScreenName): void {
-    if (name !== 'settings' && name !== 'help' && name !== 'about') this.returnTo = name === 'none' ? 'main' : name;
+    // overlay screens keep the screen they were opened from, so "Back" returns there
+    if (name !== 'settings' && name !== 'help' && name !== 'about' && name !== 'milestones') {
+      this.returnTo = name === 'none' ? 'main' : name;
+    }
     this.current = name;
     for (const [key, node] of this.screens) {
       node?.classList.toggle('active', key === name);
@@ -194,6 +164,8 @@ export class Menus {
       this.updatePauseMeta();
     });
     click('btn-pause-settings', () => this.show('settings'));
+    click('btn-milestones', () => this.openMilestones());
+    click('btn-close-milestones', () => this.show(this.game ? this.returnTo : 'main'));
     click('btn-quit', () => this.cbs.quitToWorldSelect());
 
     // death screen (MO-4)
@@ -201,6 +173,7 @@ export class Menus {
     click('btn-death-quit', () => this.cbs.quitToWorldSelect());
 
     // inventory / chest panels
+    click('btn-inv-milestones', () => this.openMilestones());
     click('btn-close-inv', () => this.cbs.closePanel());
     click('btn-close-chest', () => this.cbs.closePanel());
 
@@ -231,9 +204,6 @@ export class Menus {
       file.value = '';
     });
 
-    // tutorial overlay (UI-6)
-    click('tutorial-next', () => this.advanceTutorial());
-    click('tutorial-skip', () => this.dismissTutorial(true));
   }
 
   // ------------------------------------------------------------ world list (MM-1)
@@ -445,79 +415,61 @@ export class Menus {
     if (node) node.textContent = text;
   }
 
-  // ------------------------------------------------------------ tutorial overlay (UI-6)
-  tutorialEvent(ev: TutorialEvent): void {
-    if (this.tutorialActive === ev) return;
-    if (!this.tutorialQueue.includes(ev)) this.tutorialQueue.push(ev);
-    if (!this.tutorialActive) this.popTutorial();
+  // ------------------------------------------------------------ milestones (UI-6)
+  /** Open the progression panel (from the pause menu or the inventory). */
+  openMilestones(): void {
+    this.renderMilestones();
+    this.show('milestones');
   }
 
-  private popTutorial(): void {
-    const next = this.tutorialQueue.shift();
-    if (!next) {
-      this.tutorialActive = null;
-      this.tutorialBox.classList.add('hidden');
-      this.releaseCard();
-      return;
+  /** Redraw the milestone cards: unlocked, available (outlined) and locked (greyed, title hidden). */
+  renderMilestones(views = this.game?.milestoneViews() ?? []): void {
+    const host = document.getElementById('milestones-grid');
+    if (!host) return;
+    host.textContent = '';
+    const done = views.filter((v) => v.unlocked).length;
+    const counter = document.getElementById('milestones-count');
+    if (counter) counter.textContent = `${done} / ${views.length} unlocked`;
+
+    for (const v of views) {
+      const card = document.createElement('div');
+      card.className = `ms-card${v.unlocked ? ' unlocked' : v.available ? ' available' : ' locked'}`;
+      card.dataset.ms = v.def.id;
+
+      const icon = document.createElement('canvas');
+      icon.width = 40;
+      icon.height = 40;
+      icon.className = 'ms-icon';
+      paintItem(icon, v.def.icon);
+      if (!v.unlocked) icon.style.filter = 'grayscale(1) brightness(0.6)';
+      card.appendChild(icon);
+
+      const body = document.createElement('div');
+      body.className = 'ms-text';
+      const title = document.createElement('div');
+      title.className = 'ms-title';
+      title.textContent = v.available || v.unlocked ? v.def.title : '???';
+      const blurb = document.createElement('div');
+      blurb.className = 'ms-body';
+      blurb.textContent =
+        v.available || v.unlocked
+          ? v.def.body
+          : `Requires: ${v.def.requires.map((r) => this.titleOf(r)).join(', ')}`;
+      const goal = document.createElement('div');
+      goal.className = 'ms-goal';
+      goal.textContent = v.unlocked ? 'Unlocked' : `${v.def.goal} — ${Math.min(v.goal.have, v.goal.need)}/${v.goal.need}`;
+      body.append(title, blurb, goal);
+      card.appendChild(body);
+      host.appendChild(card);
     }
-    this.showTutorialCard(next);
   }
 
-  showTutorialCard(key: TutorialEvent | 'intro'): void {
-    const t = TUTORIAL[key];
-    this.tutorialActive = key;
-    this.cardTitle.textContent = t.title;
-    this.cardBody.textContent = t.body;
-    this.tutorialBox.classList.remove('hidden');
-    // The card has real buttons: without releasing pointer lock the cursor stays hidden
-    // inside the locked canvas and "Next" / "Skip" cannot be clicked at all.
-    this.cbs.game()?.setCardCapture(true);
-    window.clearTimeout(this.tutorialTimer);
-    this.tutorialTimer = window.setTimeout(() => this.dismissTutorial(false), 20000);
+  private titleOf(id: string): string {
+    return this.game?.milestoneViews().find((v) => v.def.id === id)?.def.title ?? id;
   }
 
-  /** True while a tutorial card owns the mouse / keyboard. */
-  tutorialShowing(): boolean {
-    return this.tutorialActive !== null;
-  }
-
-  /** Keyboard path for the card. Returns true when the key was consumed. */
-  tutorialKey(code: string): boolean {
-    if (!this.tutorialActive) return false;
-    if (code === 'Enter' || code === 'NumpadEnter' || code === 'Space') {
-      this.advanceTutorial();
-      return true;
-    }
-    if (code === 'Escape' || code === 'Backspace') {
-      this.dismissTutorial(false);
-      return true;
-    }
-    return false;
-  }
-
-  private releaseCard(): void {
-    this.cbs.game()?.setCardCapture(false);
-  }
-
-  private advanceTutorial(): void {
-    this.markDone(this.tutorialActive);
-    this.popTutorial();
-  }
-
-  private dismissTutorial(skipAll: boolean): void {
-    this.markDone(this.tutorialActive);
-    if (skipAll) this.tutorialQueue.length = 0;
-    this.tutorialActive = null;
-    this.tutorialBox.classList.add('hidden');
-    window.clearTimeout(this.tutorialTimer);
-    (document.activeElement as HTMLElement | null)?.blur?.();
-    this.releaseCard();
-    if (skipAll) this.cbs.notify('Tutorial dismissed — click the world to capture the mouse');
-  }
-
-  private markDone(key: TutorialEvent | 'intro' | null): void {
-    if (!key || key === 'intro') return;
-    this.game?.markTutorial(key);
+  milestoneShowing(): boolean {
+    return this.current === 'milestones';
   }
 
   // ------------------------------------------------------------ touch controls (UI-4)

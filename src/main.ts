@@ -1,7 +1,8 @@
 /** App entry: WebGL capability probe, world slots, game lifecycle, HUD & panel wiring. */
 import type { PlayerState, Settings, Slot, WorldRecord } from './core/types.js';
 import { AudioBus } from './audio/audio.js';
-import { Game, type Screen, type TutorialEvent } from './game/game.js';
+import { Game, type Screen } from './game/game.js';
+import type { MilestoneView } from './game/achievements.js';
 import { CraftingGrid } from './game/crafting.js';
 import { Renderer } from './render/renderer.js';
 import { downloadWorldFile, fileToWorld, makeEmptySave } from './save/codec.js';
@@ -53,7 +54,6 @@ function boot(): void {
     { name: '32-bit index buffer (large worlds)', ok: probe.webgl2 || probe.uintIndex },
     { name: 'IndexedDB (world save slots)', ok: idb.idbSupported() },
     { name: 'Web Audio (synthesised sound)', ok: typeof AudioContext !== 'undefined' || typeof webkitAudioCtx() !== 'undefined' },
-    { name: 'Pointer lock (mouse capture)', ok: 'requestPointerLock' in Element.prototype },
   ];
   if (!probe.webgl1) {
     menus.showUnsupported(features);
@@ -72,15 +72,9 @@ function boot(): void {
     if (document.hidden) void flushSave();
   });
   window.addEventListener('pagehide', () => void flushSave());
-  const unlock = (): void => {
-    void audio.ensure();
-    // Remember that the player, not the code, touched the page: pointer lock may only be taken
-    // from a gesture, and doing it after an `await` is what paints Chrome's banner.
-    game?.input.markGesture();
-  };
+  const unlock = (): void => void audio.ensure();
   window.addEventListener('pointerdown', unlock, { once: true });
   window.addEventListener('keydown', unlock, { once: true });
-  window.addEventListener('pointerdown', () => game?.input.markGesture(), true);
 
   menus.show('main');
   if (settings.showTouchControls || (navigator.maxTouchPoints ?? 0) > 0) menus.setTouchVisible(true);
@@ -104,12 +98,14 @@ function onGlobalKey(e: KeyboardEvent): void {
     notify(`Debug overlay ${settings.debugOverlay ? 'on' : 'off'}`);
     return;
   }
-  // A tutorial card owns Enter/Space/Escape while it is on screen.
-  if (game && menus.tutorialKey(e.code)) {
+  if (e.code !== 'Escape' || !game) return;
+  if (menus.milestoneShowing()) {
+    // Esc closes the milestone panel and stays in the pause menu (and never leaks to the game)
     e.preventDefault();
+    e.stopImmediatePropagation();
+    menus.show('pause');
     return;
   }
-  if (e.code !== 'Escape' || !game) return;
   if (menus.screen === 'settings' || menus.screen === 'help' || menus.screen === 'about') {
     e.preventDefault();
     menus.show(game.screen === 'none' ? 'pause' : (game.screen as never));
@@ -264,7 +260,10 @@ async function play(record: WorldRecord, fresh: boolean): Promise<void> {
         hud.markDirty();
         invUI?.refresh();
       },
-      onTutorial: (ev: TutorialEvent) => menus.tutorialEvent(ev),
+      onMilestone: (_view: MilestoneView) => {
+        hud.markDirty();
+        if (menus.milestoneShowing()) menus.renderMilestones(game?.milestoneViews() ?? []);
+      },
       onSettingsChanged: (next) => {
         saveSettings(next);
         hud.markDirty();
@@ -292,12 +291,9 @@ async function play(record: WorldRecord, fresh: boolean): Promise<void> {
   hud.setDebugVisible(settings.debugOverlay);
   menus.setTouchVisible(settings.showTouchControls || (navigator.maxTouchPoints ?? 0) > 0);
   menus.show('none');
-  // The card is shown first so it owns the cursor: a fresh world opens straight into the tutorial.
-  if (isFresh) menus.showTutorialCard('intro');
-  g.input.requestLock();
-  // After `await streamSpawn` there is no user activation left, so the lock usually has to wait
-  // for the next click — say so instead of leaving the player staring at a dead window.
-  hud.setLockHint(!g.input.locked && !menus.tutorialShowing());
+  // Mouse look needs no browser permission: the cursor simply disappears over the world and the
+  // first click captures it. Nothing to hint about, nothing for the browser to warn about.
+  g.input.setActive(true);
   startHudLoop();
 }
 
@@ -334,6 +330,8 @@ function bindings(): InventoryBindings {
       g.hooks.onInventoryChanged();
       g.markDirty();
     },
+    // UI-6: "craft X" milestones
+    onCraft: (itemId, times) => g.noteCraft(itemId, times),
     craftSound: () => g.audio.craft(),
     notify: (text, kind) => notify(text, kind ?? 'info'),
   };
@@ -350,20 +348,17 @@ function onScreen(s: Screen): void {
       // pause and the HUD never comes back" — ownership of the flag belongs here.
       playing = true;
       hud.setVisible(true);
-      hud.setLockHint(!game.input.locked);
-      game.input.requestLock();
+      game.input.capture();
       break;
     case 'inventory':
       invUI = new InventoryUI(bindings());
       invUI.build('inventory');
       menus.show('inventory');
       hud.setVisible(false);
-      hud.setLockHint(false);
       break;
     case 'chest':
       menus.show('chest');
       hud.setVisible(false);
-      hud.setLockHint(false);
       break;
     case 'pause':
       playing = false;
@@ -393,13 +388,13 @@ function startHudLoop(): void {
   window.clearInterval(hudTimer);
   hudTimer = window.setInterval(() => {
     if (!game || !playing) return;
-    hud.setLockHint(game.screen === 'none' && !game.input.locked && !menus.tutorialShowing());
     const m = game.hudModel();
     const hotbar: (HudSlotView | null)[] = [];
     for (let i = 0; i < 9; i++) {
       const s = game.inventory.main[i];
       hotbar.push(s ? { id: s.id, count: s.count, durabilityLeft: s.durabilityLeft } : null);
     }
+    hud.setMilestone(m.milestone);
     hud.render(m, hotbar, game.inventory.selected, settings);
   }, 100);
 }

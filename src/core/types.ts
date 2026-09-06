@@ -109,6 +109,14 @@ export interface SaveData {
   mobs?: MobState[];
   nextMobId: number;
   stats: { blocksMined: number; blocksPlaced: number; distance: number };
+  /** UI-6 milestone progression (replaces the old tutorial cards). */
+  milestones?: MilestoneSave;
+}
+
+/** Milestone (UI-6) progression: unlocked ids plus the gameplay counters they are measured from. */
+export interface MilestoneSave {
+  unlocked: string[];
+  stats?: unknown;
 }
 
 /** Geometry produced by the mesher, ready for GPU upload. */

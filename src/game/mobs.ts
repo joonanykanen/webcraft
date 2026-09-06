@@ -181,6 +181,9 @@ export class Mob {
         side: tile,
         front: c.head ? face : undefined,
         tints: c.head ? headTints : undefined,
+        // Face art (eyes above the snout) is painted upright; the chunk face basis runs `v`
+        // downwards, so without this every mob's face renders upside-down.
+        flipV: c.head === true,
         sky,
         block: blockLight,
         centered: true,

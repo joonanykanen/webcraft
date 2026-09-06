@@ -34,6 +34,7 @@ import { TILE } from '../world/tiles.js';
 import { raycast, type RayHit } from '../world/raycast.js';
 import { findSpawn } from '../world/worldgen.js';
 import { EntityManager, explode, settleGravity, type EntityHost } from './entities.js';
+import { Milestones, type MilestoneView } from './achievements.js';
 import { Input } from './input.js';
 import { Inventory } from './inventory.js';
 import { MobManager, type Mob, type MobKind } from './mobs.js';
@@ -86,10 +87,9 @@ export interface HudModel {
   quality: 'fancy' | 'fast';
   stats: { blocksMined: number; blocksPlaced: number; distance: number };
   deaths: number;
-  tutorialFlags: Set<TutorialEvent>;
+  /** UI-6: the next goal shown on the HUD tracker (null once everything is unlocked). */
+  milestone: { title: string; goal: string; icon: number; have: number; need: number; unlocked: number; total: number } | null;
 }
-
-export type TutorialEvent = 'firstBlock' | 'firstPlace' | 'firstCraft' | 'firstNight' | 'firstTool' | 'surviveNight';
 
 export interface GameHooks {
   onScreen(screen: Screen): void;
@@ -98,7 +98,8 @@ export interface GameHooks {
   onDeath(): void;
   onSaved(ok: boolean, ms: number): void;
   onInventoryChanged(): void;
-  onTutorial(event: TutorialEvent): void;
+  /** UI-6: a milestone just unlocked (toast + chime + panel refresh). */
+  onMilestone(view: MilestoneView): void;
   onOpenChest(slots: Slot[], label: string): void;
   /** optional: a keyboard shortcut changed a setting, so the shell can persist it */
   onSettingsChanged?(settings: Settings): void;
@@ -160,7 +161,8 @@ export class Game implements EntityHost {
   private chestSlots: Slot[] | null = null;
   private nightAnnounced = false;
   private booted = false;
-  private tutorialFlags = new Set<TutorialEvent>();
+  /** UI-6: milestone progression (replaces the tutorial cards). */
+  readonly milestones = new Milestones();
   private rnd = mulberry32(0x9e37);
   private stats: { blocksMined: number; blocksPlaced: number; distance: number };
   private startedAt = Date.now();
@@ -215,6 +217,17 @@ export class Game implements EntityHost {
     this.input.sensitivity = opts.settings.sensitivity;
     this.input.invertY = opts.settings.invertY;
     this.input.onKeyDown = (code) => this.onKey(code);
+    // UI-6: milestones react to what the player actually collects, and announce themselves.
+    this.inventory.onObtain = (id, n) => {
+      this.milestones.observe({ kind: 'obtain', item: id, n });
+    };
+    this.milestones.onUnlock = (def) => {
+      this.audio.milestone();
+      this.hooks.onToast(`Milestone unlocked: ${def.title}`, 'good');
+      this.dirtySave = true;
+      const view = this.milestones.views().find((v) => v.def.id === def.id);
+      if (view) this.hooks.onMilestone(view);
+    };
     this.input.onLockChange = (locked) => {
       if (!locked && this.screen === 'none' && this.running) this.setScreen('pause');
     };
@@ -237,6 +250,11 @@ export class Game implements EntityHost {
     }
     this.inventory.deserialize(data.inventory);
     this.inventory.select(data.selected ?? 0);
+    // UI-6: restore milestone progress (unknown ids dropped, counters merged)
+    this.milestones.warmUp(() => {
+      this.milestones.load(data.milestones);
+      this.milestones.evaluate();
+    });
     // solid ground under the player before physics starts (WG-6 M0 criterion)
     this.world.prepareSync(this.player.pos.x, this.player.pos.z, 2);
     this.ensureFreeStanding();
@@ -320,28 +338,10 @@ export class Game implements EntityHost {
     this.input.setActive(s === 'none');
     this.input.uiKeys = s === 'inventory' || s === 'chest';
     this.input.endActions();
-    if (s === 'none') this.input.requestLock();
-    else this.input.exitLock();
+    if (s === 'none') this.input.capture();
+    else this.input.release();
     if (s !== 'chest') this.chestSlots = null;
     this.hooks.onScreen(s);
-  }
-
-  /**
-   * Hand the mouse to a floating DOM card (the tutorial overlay). While captured the
-   * pointer lock is released and gameplay input is ignored — otherwise the hidden cursor
-   * makes the card's own buttons unclickable.
-   */
-  setCardCapture(capture: boolean): void {
-    this.input.uiCapture = capture;
-    this.input.consumeLook();
-    if (capture) {
-      this.input.exitLock();
-      this.input.endActions();
-      this.input.setActive(false); // also releases held movement keys
-    } else if (this.screen === 'none' && !this.paused) {
-      this.input.requestLock();
-      this.input.setActive(true);
-    }
   }
 
   // ------------------------------------------------------------ main loop
@@ -417,9 +417,12 @@ export class Game implements EntityHost {
     this.audio.tickAmbience(frameDt, lightInfo.night, this.player.headInWater ? 1 : underground, 0);
     if (lightInfo.night > 0.75 && !this.nightAnnounced) {
       this.nightAnnounced = true;
-      this.hooks.onTutorial('firstNight');
     }
-    if (lightInfo.night < 0.25) this.nightAnnounced = false;
+    if (lightInfo.night < 0.25 && this.nightAnnounced) {
+      // the sun came back up on us: that counts as surviving a night
+      this.nightAnnounced = false;
+      this.milestones.observe({ kind: 'flag', name: 'nights' });
+    }
 
     // ---- autosave (SV-1) ----
     this.saveTimer -= frameDt;
@@ -450,9 +453,15 @@ export class Game implements EntityHost {
     this.entities.cullFar(this.player.pos, 140, this.renderer);
     if (this.player.dead) {
       if (this.screen !== 'death') {
+        this.milestones.observe({ kind: 'flag', name: 'deaths' });
         this.setScreen('death');
         this.hooks.onDeath();
       }
+    }
+    // world-exploration milestones, sampled cheaply once per second
+    if (this.tickCount % 20 === 0) {
+      if (this.player.pos.y < 20) this.milestones.observe({ kind: 'flag', name: 'deepCave' });
+      if (this.player.headInWater) this.milestones.observe({ kind: 'flag', name: 'swam' });
     }
     if (this.tickCount % 20 === 0) this.dirtySave = true;
     this.lastTickMs = performance.now() - t0;
@@ -548,6 +557,12 @@ export class Game implements EntityHost {
         }
         this.mineTick(dt, this.target);
       } else {
+        // punching air still swings — an arm that ignores the button reads as a broken game
+        if (this.swingTimer <= 0) {
+          this.swingTimer = 0.42;
+          this.renderer.swingHand();
+          this.audio.step('dirt');
+        }
         this.mineProgress = 0;
         this.mineKey = '';
       }
@@ -570,6 +585,7 @@ export class Game implements EntityHost {
     const tool = toolOf(held);
     const damage = tool ? tool.damage : 1;
     this.mobs.hitMob(mob, damage, this.player.pos, this);
+    if (mob.dead) this.milestones.observe({ kind: 'kill', mob: mob.kind as MobKind });
     this.useTool(1);
     this.audio.step('wood');
   }
@@ -622,7 +638,7 @@ export class Game implements EntityHost {
     }
     this.stats.blocksMined++;
     this.dirtySave = true;
-    this.hooks.onTutorial('firstBlock');
+    this.milestones.observe({ kind: 'mine', block: id });
     this.settleGravity(hit.x, hit.y, hit.z);
   }
 
@@ -705,8 +721,7 @@ export class Game implements EntityHost {
     }
     this.stats.blocksPlaced++;
     this.dirtySave = true;
-    this.hooks.onTutorial('firstPlace');
-    this.hooks.onTutorial('firstTool');
+    this.milestones.observe({ kind: 'place', block: blockId });
     this.settleGravity(px, py, pz);
   }
 
@@ -783,6 +798,7 @@ export class Game implements EntityHost {
       mobs: this.mobs.serializeMobs(),
       nextMobId: this.mobs.nextId,
       stats: { ...this.stats, distance: this.stats.distance + this.player.distanceWalked },
+      milestones: this.milestones.save(),
     };
     return data;
   }
@@ -887,7 +903,7 @@ export class Game implements EntityHost {
       quality: this.settings.quality,
       stats: { ...this.stats },
       deaths: this.player.deaths,
-      tutorialFlags: this.tutorialFlags,
+      milestone: this.milestoneTracker(),
     };
   }
 
@@ -905,13 +921,34 @@ export class Game implements EntityHost {
     this.dirtySave = true;
   }
 
-  /** UI-6: mark a tutorial card as seen. */
-  markTutorial(ev: TutorialEvent): void {
-    this.tutorialFlags.add(ev);
+  /** UI-6: HUD tracker row (null when the whole chain is done). */
+  milestoneTracker(): HudModel['milestone'] {
+    const nx = this.milestones.next();
+    if (!nx) return null;
+    return {
+      title: nx.def.title,
+      goal: nx.def.goal,
+      icon: nx.def.icon,
+      have: Math.min(nx.goal.have, nx.goal.need),
+      need: nx.goal.need,
+      unlocked: this.milestones.unlockedCount,
+      total: this.milestones.total,
+    };
   }
 
-  hasTutorial(ev: TutorialEvent): boolean {
-    return this.tutorialFlags.has(ev);
+  /** UI-6: the panel's rows (locked ones flagged, plus live progress). */
+  milestoneViews(): MilestoneView[] {
+    return this.milestones.views();
+  }
+
+  /** UI-6: called by the crafting UI so "craft X" milestones can be measured. */
+  noteCraft(itemId: number, times = 1): void {
+    for (let i = 0; i < times; i++) this.milestones.observe({ kind: 'craft', item: itemId });
+  }
+
+  /** UI-6: called when a mob dies to us. */
+  noteKill(kind: MobKind): void {
+    this.milestones.observe({ kind: 'kill', mob: kind });
   }
 
   /** IN-3: true when a crafting table is close enough to unlock the 3×3 grid. */

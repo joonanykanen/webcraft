@@ -17,10 +17,11 @@ export const DAY_LENGTH_MS = 10 * 60 * 1000; // RD-5: full cycle = 10 minutes
 
 // ---- input ----
 /** Radians of look per raw mouse pixel at sensitivity 1.0 (halved scale felt sluggish). */
-export const LOOK_PER_PIXEL = 0.0044;
+export const LOOK_PER_PIXEL = 0.0088;
 /** Ignore look deltas this long after pointer lock engages: the recentring is reported as one
  * enormous movement delta and looked like the sensitivity spiking. */
-export const LOCK_SETTLE_MS = 140;
+/** One mousemove may never turn more than this (radians): kills "sensitivity spike" jumps. */
+export const MAX_LOOK_PER_EVENT = 0.9;
 
 // ---- physics (PH-2, PH-3) ----
 export const PLAYER_WIDTH = 0.6;

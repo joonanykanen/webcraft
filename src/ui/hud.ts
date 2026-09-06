@@ -24,7 +24,11 @@ export class Hud {
   private hungerRow = el<HTMLElement>('hunger-row');
   private airRow = el<HTMLElement>('air-row');
   private hotbarEl = el<HTMLElement>('hotbar');
-  private lockHint = el<HTMLElement>('lock-hint');
+  private tracker = el<HTMLElement>('milestone-tracker');
+  private trackerTitle = el<HTMLElement>('milestone-tracker').querySelector<HTMLElement>('.milestone-title')!;
+  private trackerGoal = el<HTMLElement>('milestone-tracker').querySelector<HTMLElement>('.milestone-goal')!;
+  private trackerIcon = el<HTMLElement>('milestone-tracker').querySelector<HTMLCanvasElement>('.milestone-icon')!;
+  private statRows = el<HTMLElement>('stat-rows');
   private debugEl = el<HTMLElement>('debug');
   private toastsEl = el<HTMLElement>('toasts');
   private titleEl = el<HTMLElement>('title-card');
@@ -99,9 +103,35 @@ export class Hud {
    */
   swing(): void {}
 
-  /** "Click the world to capture the mouse" — shown whenever the game wants the pointer. */
-  setLockHint(show: boolean): void {
-    this.lockHint.classList.toggle('hidden', !show);
+  /**
+   * UI-6: the HUD's "next goal" line. Replaces the tutorial cards: instead of explaining the game
+   * up front, it keeps telling the player what to do next.
+   */
+  setMilestone(m: { title: string; goal: string; icon: number; have: number; need: number; unlocked: number; total: number } | null): void {
+    if (!m) {
+      this.tracker.classList.add('hidden');
+      return;
+    }
+    const key = `${m.title}:${m.have}`;
+    if (key === this.lastMilestone) return;
+    this.lastMilestone = key;
+    this.trackerTitle.textContent = m.title;
+    this.trackerGoal.textContent = `${m.goal} (${m.have}/${m.need}) · ${m.unlocked}/${m.total} done`;
+    paintItem(this.trackerIcon, m.icon);
+    this.tracker.classList.remove('hidden');
+    this.tracker.classList.remove('bump');
+    void this.tracker.offsetWidth; // restart the pop animation
+    this.tracker.classList.add('bump');
+  }
+  private lastMilestone = '';
+
+  /**
+   * Hearts and hunger must sit flush with the hotbar (UI-3). The hotbar width depends on the slot
+   * size in CSS, so measure it instead of hard-coding a second, drifting number.
+   */
+  alignStatRows(): void {
+    const w = this.hotbarEl.offsetWidth;
+    if (w > 0) this.statRows.style.width = `${w}px`;
   }
 
   hurt(): void {
@@ -135,6 +165,7 @@ export class Hud {
   render(m: HudModel, hotbar: (HudSlotView | null)[], selected: number, _settings: Settings): void {
     if (hotbar !== this.lastHotbar || selected !== this.currentSelection || this.dirty) {
       this.currentSelection = selected;
+      this.alignStatRows();
       this.lastHotbar = hotbar;
       this.dirty = false;
       for (let i = 0; i < this.slots.length; i++) {

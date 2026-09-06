@@ -173,6 +173,12 @@ export class AudioBus {
     setTimeout(() => this.tone(990, 0.12, 0.18, 'triangle'), 70);
   }
 
+  /** UI-6: milestone unlocked — a short ascending chime (vanilla's "advancement" sound). */
+  milestone(): void {
+    const notes = [784, 988, 1319];
+    notes.forEach((f, i) => setTimeout(() => this.tone(f, 0.16, 0.2, 'triangle'), i * 90));
+  }
+
   eat(): void {
     for (let i = 0; i < 3; i++) setTimeout(() => this.noise(0.09, 380 + i * 60, 1.6, 0.24, 'bandpass'), i * 110);
   }

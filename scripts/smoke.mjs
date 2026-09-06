@@ -28,33 +28,9 @@ function check(name, cond, info = '') {
   cond ? ok(name, info) : bad(name, info);
 }
 /** Hard step: an exception skips to the next section instead of aborting the run. */
-/**
- * Tutorial cards intentionally take the mouse and freeze gameplay input while they are up
- * (that is how their buttons stay clickable). A test driving raw input has to behave like a
- * player who clicks "Next", so every step clears whatever card the previous step triggered.
- */
-async function dismissCards(page) {
-  const dismissed = await page.evaluate(() => {
-    const card = document.getElementById('tutorial');
-    if (!card || card.classList.contains('hidden')) return false;
-    document.getElementById('tutorial-skip')?.click();
-    const g = window.webcraft.game;
-    if (g && g.screen === 'none') {
-      // A synthetic click carries no user activation, so the game cannot re-capture the
-      // pointer here; the harness takes ownership back the same way the other steps do.
-      g.input.setActive(true);
-      g.input.locked = true;
-    }
-    return true;
-  });
-  return dismissed;
-}
-
 let activePage = null;
 
-async function step(name, fn, opts = {}) {
-  const clear = activePage && !opts.keepCards;
-  if (clear) await dismissCards(activePage);
+async function step(name, fn, _opts = {}) {
   try {
     const info = await fn();
     ok(name, info ?? '');
@@ -62,8 +38,6 @@ async function step(name, fn, opts = {}) {
   } catch (e) {
     bad(name, (e?.message ?? String(e)).split('\n')[0]);
     return false;
-  } finally {
-    if (clear) await dismissCards(activePage).catch(() => undefined);
   }
 }
 
@@ -79,7 +53,7 @@ function startServer() {
 
 const isActive = (id) => `!!document.querySelector('#${id}.active')`;
 
-async function startWorld(page, { name, seed, mode = 'survival', tutorial = 'skip' }) {
+async function startWorld(page, { name, seed, mode = 'survival' }) {
   if (!(await page.evaluate(isActive('screen-worlds')))) await page.click('#btn-worlds');
   await page.waitForFunction(isActive('screen-worlds'), null, { timeout: 10000 });
   if (name) await page.fill('#new-name', name);
@@ -92,17 +66,9 @@ async function startWorld(page, { name, seed, mode = 'survival', tutorial = 'ski
   await page.waitForFunction(() => !!window.webcraft?.game && !document.querySelector('.screen.active'), null, {
     timeout: 60000,
   });
-  // A fresh world opens with the intro card ~1.7 s after spawn, and the card (by design) owns
-  // the mouse and freezes gameplay input. Most steps don't want that; the tutorial step opts out.
-  if (tutorial === 'skip') {
-    await page.waitForTimeout(2000);
-    await page.evaluate(() => document.getElementById('tutorial-skip')?.click());
-    await page.evaluate(() => {
-      const g = window.webcraft.game;
-      g.input.setActive(true);
-      g.input.locked = true;
-    });
-  }
+  // The world only owns the mouse after a click into it (no Pointer Lock banner involved);
+  // the harness takes ownership the same way a player's first click would.
+  await page.evaluate(() => window.webcraft.game.input.capture());
 }
 
 async function worldLoaded(page) {
@@ -186,6 +152,16 @@ async function main() {
 
   const context = await browser.newContext({ viewport: { width: 1280, height: 800 }, acceptDownloads: true });
   const page = await context.newPage();
+  // Issue #1 is "Chrome says the mouse pointer is hidden". That banner only appears through the
+  // Pointer Lock API, so the game must never call it — count the calls from the very start.
+  await page.addInitScript(() => {
+    window.__pointerLockCalls = 0;
+    const orig = Element.prototype.requestPointerLock;
+    Element.prototype.requestPointerLock = function (...args) {
+      window.__pointerLockCalls++;
+      return orig?.apply(this, args);
+    };
+  });
   activePage = page;
   const consoleErrors = [];
   const pageErrors = [];
@@ -208,13 +184,11 @@ async function main() {
     });
 
     // ------------------------------------------------------------ create & load a world
-    // keepCards: the intro card must survive until the step that exercises it
     await step(
       'create world starts the game',
-      () => startWorld(page, { name: 'Smoke Test', seed: '1337', tutorial: 'keep' }),
-      { keepCards: true },
+      () => startWorld(page, { name: 'Smoke Test', seed: '1337' }),
     );
-    await step('terrain streams in (chunk meshes upload)', () => worldLoaded(page), { keepCards: true });
+    await step('terrain streams in (chunk meshes upload)', () => worldLoaded(page));
 
     const hud = await page.evaluate(() => ({
       hotbar: document.querySelectorAll('#hotbar .slot').length,
@@ -225,36 +199,80 @@ async function main() {
       food: window.webcraft.game.hudModel().food,
     }));
     check('HUD: 9 hotbar slots + 10 hearts + 10 hunger pips', hud.hotbar === 9 && hud.hearts === 10 && hud.hunger === 10, JSON.stringify(hud));
+    // UI-3: hearts/hunger must sit flush with the hotbar, not on their own wider row
+    // (the HUD measures the hotbar on its first painted frame, so give it a beat)
+    await page.waitForFunction(() => document.getElementById('stat-rows').style.width !== '', null, { timeout: 4000 });
+    const flush = await page.evaluate(() => {
+      const box = (id) => document.getElementById(id).getBoundingClientRect();
+      const hot = box('hotbar');
+      const heart = box('health-row');
+      const food = box('hunger-row');
+      return { left: heart.left - hot.left, right: hot.right - food.right, gap: hot.top - heart.bottom };
+    });
+    check(
+      'HUD: hearts/hunger are flush with the hotbar edges (UI-3)',
+      Math.abs(flush.left) <= 4 && Math.abs(flush.right) <= 4 && flush.gap >= 0 && flush.gap <= 22,
+      JSON.stringify(flush),
+    );
     check('player starts with full health and food', hud.health >= 20 && hud.food >= 19, `health=${hud.health} food=${hud.food}`);
     check('debug overlay hidden by default', hud.debugHidden === true);
 
-    // ------------------------------------------------------------ tutorial owns the mouse? (UI-6)
-    await step('tutorial card releases the cursor so its buttons are clickable', async () => {
-      const up = await page.evaluate(() => {
-        const t = document.getElementById('tutorial');
-        return !!t && !t.classList.contains('hidden');
+    // ------------------------------------------------------------ milestones (UI-6)
+    await step('milestone tracker shows the next goal while playing (UI-6)', async () => {
+      await page.waitForFunction(() => !document.getElementById('milestone-tracker').classList.contains('hidden'), null, {
+        timeout: 5000,
       });
-      if (!up) return 'no card on screen (world already tutorial-taught) — skipped';
-      const gate = await page.evaluate(() => ({
-        locked: window.webcraft.game.input.locked,
-        active: window.webcraft.game.input.active,
+      const t = await page.evaluate(() => {
+        const el = document.getElementById('milestone-tracker');
+        return {
+          shown: !el.classList.contains('hidden'),
+          title: el.querySelector('.milestone-title').textContent,
+          goal: el.querySelector('.milestone-goal').textContent,
+          model: window.webcraft.game.milestoneTracker(),
+        };
+      });
+      if (!t.shown) throw new Error('tracker missing from the HUD');
+      if (!t.model || !t.model.title) throw new Error('game has no next milestone');
+      if (!/\d+\/\d+/.test(t.goal)) throw new Error(`tracker shows no progress: ${t.goal}`);
+      return `${t.title} — ${t.goal}`;
+    });
+
+    await step('milestone panel lists the chain and unlocks from real play (UI-6)', async () => {
+      await page.keyboard.press('Escape');
+      await page.waitForFunction(() => window.webcraft.game.screen === 'pause', null, { timeout: 4000 });
+      await page.click('#btn-milestones');
+      await page.waitForSelector('#screen-milestones.active', { timeout: 4000 });
+      const before = await page.evaluate(() => ({
+        cards: document.querySelectorAll('.ms-card').length,
+        unlocked: document.querySelectorAll('.ms-card.unlocked').length,
+        available: document.querySelectorAll('.ms-card.available').length,
       }));
-      if (gate.locked) throw new Error('pointer stayed locked while a card was up — Next/Skip are unclickable');
-      if (gate.active) throw new Error('gameplay input stayed live behind the card');
-      await page.mouse.move(500, 350);
-      await page.click('#tutorial-next', { timeout: 4000 });
-      const hidden = await page.evaluate(() => document.getElementById('tutorial')?.classList.contains('hidden'));
-      if (!hidden) throw new Error('a real mouse click on Next did not dismiss the card');
-      // From here on the tour drives raw input, so act like a player who instantly clicks
-      // "Next" on every card: a card would otherwise freeze gameplay input mid-step.
-      await page.evaluate(() => {
-        window.__cardKiller = setInterval(() => {
-          const t = document.getElementById('tutorial');
-          if (t && !t.classList.contains('hidden')) document.getElementById('tutorial-skip')?.click();
-        }, 120);
+      if (before.cards < 12) throw new Error(`only ${before.cards} milestone cards`);
+      if (!before.available) throw new Error('no milestone is available at the start');
+      await page.screenshot({ path: join(SHOTS, '09-milestones.png') });
+      // Escape closes the panel back to the pause menu and does not leak into the world
+      await page.keyboard.press('Escape');
+      await page.waitForTimeout(300);
+      const back = await page.evaluate(() => ({
+        panel: document.getElementById('screen-milestones').classList.contains('active'),
+        pause: document.getElementById('screen-pause').classList.contains('active'),
+        screen: window.webcraft.game.screen,
+      }));
+      if (back.panel) throw new Error('Escape did not close the milestone panel');
+      if (!back.pause || back.screen !== 'pause') throw new Error('Escape did not return to the pause menu: ' + JSON.stringify(back));
+      await page.click('#btn-resume');
+      await page.waitForTimeout(300);
+      // play a goal for real: mine a log and the first milestone must unlock
+      const got = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const before = g.milestones.unlockedCount;
+        g.milestones.observe({ kind: 'mine', block: 4 });
+        await new Promise((r) => setTimeout(r, 120));
+        return { before, after: g.milestones.unlockedCount, first: g.milestones.has('firstLog') };
       });
-      return 'clicked Next with the real mouse';
-    }, { keepCards: true });
+      if (!got.first || got.after <= got.before) throw new Error('mining a log did not unlock a milestone: ' + JSON.stringify(got));
+      return `${before.cards} cards (${before.available} available), unlocked ${got.before}→${got.after}`;
+    });
 
     await step('clicking the world captures the pointer and moving it looks around (BI-1)', async () => {
       await page.evaluate(() => {
@@ -266,15 +284,21 @@ async function main() {
       await page.mouse.click(500, 350);
       await page.waitForTimeout(250);
       const locked = await page.evaluate(() => ({
-        dom: !!document.pointerLockElement,
+        plElement: !!document.pointerLockElement,
+        plCalls: window.__pointerLockCalls ?? 0,
         game: window.webcraft.game.input.locked,
+        cursorHidden: document.body.classList.contains('mouse-captured'),
       }));
       await page.evaluate(() => {
         const g = window.webcraft.game;
         g.input.mining = false;
         g.input.placing = false;
       });
-      if (!locked.dom || !locked.game) throw new Error(`pointer lock not engaged: ${JSON.stringify(locked)}`);
+      if (!locked.game) throw new Error('click did not capture the mouse: ' + JSON.stringify(locked));
+      if (!locked.cursorHidden) throw new Error('cursor stayed visible over the world: ' + JSON.stringify(locked));
+      // The whole point: never call requestPointerLock — that is what painted Chrome's
+      // "Your mouse pointer is hidden" banner and swallowed the first Escape.
+      if (locked.plElement || locked.plCalls > 0) throw new Error('pointer lock was used: ' + JSON.stringify(locked));
       const before = await page.evaluate(() => ({ yaw: window.webcraft.game.player.yaw, pitch: window.webcraft.game.player.pitch }));
       for (let i = 1; i <= 6; i++) await page.mouse.move(500 + i * 18, 350 - i * 5);
       await page.waitForTimeout(200);
@@ -289,7 +313,7 @@ async function main() {
         window.webcraft.game.player.yaw = 0;
         window.webcraft.game.player.pitch = 0;
       });
-      return `Δyaw=${turned.toFixed(3)} Δpitch=${pitched.toFixed(3)}`;
+      return `Δyaw=${turned.toFixed(3)} Δpitch=${pitched.toFixed(3)} (${(Math.abs(turned) / 108).toFixed(4)} rad/px, no pointer lock)`;
     });
 
     const st = await page.evaluate(() => {
@@ -354,7 +378,6 @@ async function main() {
 
     // ------------------------------------------------------------ mob rendering (MO-1)
     await step('mobs render as finite geometry in front of the camera', async () => {
-      await dismissCards(page);
       const r = await page.evaluate(async () => {
         const g = window.webcraft.game;
         g.input.locked = true;
@@ -629,9 +652,16 @@ async function main() {
         const g = window.webcraft.game;
         g.inventory.setSlot(0, { id: 3, count: 1 }); // stone
         g.inventory.select(0);
+        g.player.yaw = 0;
+        g.player.pitch = 0;
       });
       await page.waitForTimeout(250);
-      const clip = { x: 500, y: 300, width: 380, height: 280 };
+      const where = await page.evaluate(() => {
+        const [x, y, z] = window.webcraft.game.renderer.hand.limbPosition;
+        return { x, y, z, on: window.webcraft.game.renderer.hand.visible };
+      });
+      // The arm enters from the bottom-right corner, so compare pixels where it actually is.
+      const clip = { x: 880, y: 500, width: 360, height: 280 };
       const withHand = await page.screenshot({ clip });
       await page.evaluate(() => window.webcraft.game.renderer.setHandVisible(false));
       await page.waitForTimeout(200);
@@ -639,8 +669,13 @@ async function main() {
       await page.evaluate(() => window.webcraft.game.renderer.setHandVisible(true));
       await page.waitForTimeout(200);
       if (withHand.equals(withoutHand)) throw new Error('hiding the hand did not change the frame');
+      if (!where.on) throw new Error('view model reports itself invisible while the setting is on');
+      // foreshortening: the elbow end must be the near one, right and low in camera space
+      if (!(where.x > 0.3 && where.y < -0.3 && where.z < 0)) {
+        throw new Error(`arm root is not in the bottom-right of camera space: ${JSON.stringify(where)}`);
+      }
       await page.screenshot({ path: join(SHOTS, '08-hand.png') });
-      return 'held block + arm render in a second pass';
+      return `held block + arm in a second pass, elbow at ${JSON.stringify(where)}`;
     });
 
     await step('HUD comes back after the mouse is lost and the game resumes (UI-3)', async () => {
@@ -652,29 +687,29 @@ async function main() {
       await page.waitForTimeout(500);
       const state = await page.evaluate(() => ({
         screen: window.webcraft.game.screen,
-        locked: !!document.pointerLockElement,
+        captured: window.webcraft.game.input.locked && document.body.classList.contains('mouse-captured'),
         hud: getComputedStyle(document.getElementById('hud')).display !== 'none',
         health: document.querySelectorAll('#health-row .pip').length,
       }));
       if (state.screen !== 'none') throw new Error('did not return to the world: ' + JSON.stringify(state));
       if (!state.hud) throw new Error('HUD still hidden after resume: ' + JSON.stringify(state));
       if (state.health !== 10) throw new Error('health bar did not repaint: ' + JSON.stringify(state));
-      if (!state.locked) throw new Error('resume did not re-capture the mouse: ' + JSON.stringify(state));
-      // and the "click the world" hint follows the world's want-the-mouse state
-      const hint = await page.evaluate(async () => {
+      if (!state.captured) throw new Error('resume did not re-capture the mouse: ' + JSON.stringify(state));
+      // and while a menu is open the cursor must be usable again (no hidden-pointer trap)
+      const paused = await page.evaluate(async () => {
         const g = window.webcraft.game;
-        const shown = () => getComputedStyle(document.getElementById('lock-hint')).display !== 'none';
-        const wasLocked = g.input.locked;
-        g.input.locked = false; // as if the browser dropped the lock (no pause, UI-only)
-        await new Promise((r) => setTimeout(r, 350));
-        const on = shown();
-        g.input.locked = wasLocked;
-        await new Promise((r) => setTimeout(r, 350));
-        return { on, off: !shown() };
+        window.webcraft.game.setScreen('pause');
+        await new Promise((r) => setTimeout(r, 250));
+        const hiddenInMenu = document.body.classList.contains('mouse-captured');
+        const resume = document.getElementById('btn-resume');
+        const clickable = !!resume && resume.getBoundingClientRect().width > 0;
+        return { hiddenInMenu, clickable };
       });
-      if (!hint.on) throw new Error('click-to-capture hint did not appear while the mouse was free');
-      if (!hint.off) throw new Error('click-to-capture hint stayed on after recapture');
-      return 'HUD + capture + hint all correct across focus loss';
+      if (paused.hiddenInMenu) throw new Error('cursor still hidden while the pause menu is open');
+      if (!paused.clickable) throw new Error('Resume button not clickable');
+      await page.click('#btn-resume');
+      await page.waitForTimeout(200);
+      return 'HUD + capture + visible cursor in menus all correct';
     });
 
     await step('night falls gradually instead of snapping (RD-5)', async () => {
@@ -838,7 +873,6 @@ async function main() {
 
     // ------------------------------------------------------------ creative sanity
     await step('creative mode: flight + instant break', async () => {
-      await dismissCards(page);
       if (!(await page.evaluate(isActive('screen-worlds')))) await page.click('#btn-worlds').catch(() => {});
       await startWorld(page, { name: 'Creative Check', seed: '2', mode: 'creative' });
       await worldLoaded(page);

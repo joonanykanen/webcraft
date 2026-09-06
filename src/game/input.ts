@@ -1,5 +1,5 @@
-/** Input: keyboard + Pointer-Lock mouse (PH-1), wheel, gamepad (PH-7) and touch overrides (UI-4). */
-import { LOCK_SETTLE_MS, LOOK_PER_PIXEL } from '../core/constants.js';
+/** Input: keyboard + captured-mouse look (PH-1), wheel, gamepad (PH-7) and touch overrides (UI-4). */
+import { LOOK_PER_PIXEL, MAX_LOOK_PER_EVENT } from '../core/constants.js';
 
 export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
 
@@ -40,8 +40,32 @@ export interface MoveState {
   down: boolean;
 }
 
+/**
+ * One mousemove event may never turn the camera further than this (radians).
+ * Also drops garbage: a non-finite delta once turned the whole player NaN — an unplayable world.
+ */
+export function clampStep(radians: number): number {
+  if (!Number.isFinite(radians)) return 0;
+  if (radians > MAX_LOOK_PER_EVENT) return MAX_LOOK_PER_EVENT;
+  if (radians < -MAX_LOOK_PER_EVENT) return -MAX_LOOK_PER_EVENT;
+  return radians;
+}
+
+/** A press of this key still counts as "just pressed" for this long (taps can fit between ticks). */
+const JUMP_BUFFER_MS = 140;
+
+/**
+ * Mouse look **without** the Pointer Lock API.
+ *
+ * `requestPointerLock()` is what made Chrome paint its "Your mouse pointer is hidden…" banner, and
+ * the first Escape was eaten by the browser to dismiss that banner — so pausing needed two presses.
+ * Here we only hide the cursor over the page and read raw movement deltas: in the world the pointer
+ * is invisible and drives the camera, in any menu it is visible again, and Escape always means
+ * "pause" on the very first press.
+ */
 export class Input {
   readonly down = new Set<string>();
+  /** True while the world owns the mouse (cursor hidden, movement drives the camera). */
   locked = false;
   active = false; // false while a menu/screen owns the keyboard
   uiKeys = false; // true while the inventory/chest panel is open (E and Escape still reach the game)
@@ -50,12 +74,15 @@ export class Input {
   wheel = 0;
   lookDX = 0;
   lookDY = 0;
-  /** True while we intentionally give up the pointer (panel, tutorial card). */
+  /** True while we hand the cursor back on purpose (a panel opened) — the app must not pause. */
   expectUnlock = false;
-  /** Timestamp of the last Space press; a tap can begin and end between two sim steps. */
+  /** Timestamp of the last Space press so a tap shorter than one tick still jumps. */
   jumpPressedAt = -1e12;
   sensitivity = 1;
-  invertY = false;  /** touch overrides (UI-4) */
+  invertY = false;
+  /** True when the world asked for the mouse and the player has not clicked into it yet. */
+  wantCapture = false;
+  /** touch overrides (UI-4) */
   touch = {
     enabled: false,
     x: 0,
@@ -69,35 +96,26 @@ export class Input {
     place: false,
   };
   onKeyDown: KeyHandler | null = null;
+  /** Fires when the world gains or loses the mouse (the app pauses on loss). */
   onLockChange: ((locked: boolean) => void) | null = null;
   onWheel: ((delta: number) => void) | null = null;
   private canvas: HTMLCanvasElement | null = null;
-  private lastShiftTap = -1;
-  private lastWTap = -1;
+  /** -1e9 so the first tap after load is never mistaken for a double-tap. */
+  private lastShiftTap = -1e9;
+  private lastWTap = -1e9;
   private sprintHold = false;
-  /** Caps Lock doubles as sprint: macOS swallows Ctrl+Space, so Ctrl+W + jump is a dead end. */
+  /** Caps Lock doubles as sprint: macOS steals Ctrl+Space, so "Ctrl+W then jump" is a dead end there. */
   private capsSprint = false;
-  /** Ignore look deltas for a moment after the lock engages (the cursor gets re-centred). */
-  private settleUntil = -1e12;
-  /** Last user gesture (click/keypress); pointer lock may only be taken from one. */
-  private gestureAt = -1e12;
-  /**
-   * True while a floating card (the tutorial overlay) owns the cursor. Lock requests are refused —
-   * and remembered — until it hands the cursor back: a grant that was still in flight when the card
-   * appeared used to capture the pointer behind the player's back (= unclickable "Next" button).
-   */
-  uiCapture = false;
-  private releaseOnGrantUntil = 0;
-  /** `requestPointerLock()` was called and its `pointerlockchange` has not arrived yet. */
-  private pendingRequest = false;
-  /** We would like the pointer but had no gesture for it; the next click will take it. */
-  wantLock = false;
+  private lastX = 0;
+  private lastY = 0;
+  private hasLast = false;
   private gamepadButtons: boolean[] = [];
   private gamepadAxes = [0, 0, 0, 0];
   private gamepadConnected = false;
 
   attach(canvas: HTMLCanvasElement): void {
-    this.canvas = canvas;    window.addEventListener('keydown', this.keyDown);
+    this.canvas = canvas;
+    window.addEventListener('keydown', this.keyDown);
     window.addEventListener('keyup', this.keyUp);
     window.addEventListener('blur', this.blur);
     canvas.addEventListener('mousedown', this.mouseDown);
@@ -105,12 +123,13 @@ export class Input {
     window.addEventListener('mousemove', this.mouseMove);
     window.addEventListener('wheel', this.wheelHandler, { passive: true });
     window.addEventListener('contextmenu', this.contextMenu);
-    document.addEventListener('pointerlockchange', this.lockChange);
+    // the pointer left the window: the world no longer has it
+    document.addEventListener('mouseleave', this.windowLeft);
     window.addEventListener('gamepadconnected', this.gamepadChange);
     window.addEventListener('gamepaddisconnected', this.gamepadChange);
   }
 
-  /** Only the canvas is needed to take the pointer; listeners stay with attach() (tests, embeds). */
+  /** Only the canvas matters for capturing; listeners stay with attach() (tests, embeds). */
   setCanvas(canvas: HTMLCanvasElement): void {
     this.canvas = canvas;
   }
@@ -124,15 +143,15 @@ export class Input {
     window.removeEventListener('mousemove', this.mouseMove);
     window.removeEventListener('wheel', this.wheelHandler);
     window.removeEventListener('contextmenu', this.contextMenu);
-    document.removeEventListener('pointerlockchange', this.lockChange);
+    document.removeEventListener('mouseleave', this.windowLeft);
     window.removeEventListener('gamepadconnected', this.gamepadChange);
     window.removeEventListener('gamepaddisconnected', this.gamepadChange);
+    this.setCaptured(false, true);
   }
 
   private contextMenu = (e: Event) => e.preventDefault();
 
   private keyDown = (e: KeyboardEvent) => {
-    this.gestureAt = performance.now();
     this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
     if (e.repeat) {
       if (GAME_KEYS.has(e.code) && this.active) e.preventDefault();
@@ -151,7 +170,9 @@ export class Input {
       if (now - this.lastWTap < 300) this.sprintHold = true;
       this.lastWTap = now;
     }
-    if (this.active || this.uiKeys) this.onKeyDown?.(e.code, e);
+    // Escape always reaches the app — even while a menu owns the keyboard — so ONE press pauses
+    // and one press resumes.
+    if (this.active || this.uiKeys || e.code === 'Escape') this.onKeyDown?.(e.code, e);
   };
 
   private keyUp = (e: KeyboardEvent) => {
@@ -166,17 +187,23 @@ export class Input {
     this.mining = false;
     this.placing = false;
     this.sprintHold = false;
+    this.release(); // alt-tab: the mouse is gone, and the app pauses on the resulting change
+  };
+
+  private windowLeft = () => {
+    if (!this.locked) return;
+    this.down.clear();
+    this.release();
   };
 
   private mouseDown = (e: MouseEvent) => {
-    this.gestureAt = performance.now();
     if (!this.active) return;
-    // Start the action even when the pointer is still free: a click that captures the mouse
-    // should also swing the player's arm, otherwise the first hit "does nothing".
+    // The action starts even when the cursor is still visible: the click that captures the mouse
+    // must also swing the arm, otherwise the very first hit "does nothing".
     if (e.button === 0) this.mining = true;
     if (e.button === 2) this.placing = true;
     if (e.button === 1) this.onKeyDown?.('MouseMiddle', e as unknown as KeyboardEvent);
-    if (!this.locked) this.requestLock();
+    if (!this.locked) this.capture();
   };
 
   private mouseUp = (e: MouseEvent) => {
@@ -186,12 +213,29 @@ export class Input {
 
   private mouseMove = (e: MouseEvent) => {
     this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
-    if (!this.locked || !this.active) return;
-    // Entering pointer lock recentres the cursor; the browser reports that jump as one huge
-    // movement delta, which felt like the mouse going crazy while the button was held.
-    if (performance.now() < this.settleUntil) return;
-    this.lookDX += e.movementX * LOOK_PER_PIXEL * this.sensitivity;
-    this.lookDY += e.movementY * LOOK_PER_PIXEL * this.sensitivity * (this.invertY ? -1 : 1);
+    if (!this.locked || !this.active) {
+      this.lastX = e.clientX;
+      this.lastY = e.clientY;
+      this.hasLast = false;
+      return;
+    }
+    // movementX/Y is exact; clientX deltas are the fallback (and let tests drive the camera).
+    // Some engines report `undefined`/NaN on the first event after a focus change — feeding that
+    // into the yaw would make every coordinate NaN (= unplayable world), so sanitise first.
+    let dx = Number.isFinite(e.movementX) ? e.movementX : 0;
+    let dy = Number.isFinite(e.movementY) ? e.movementY : 0;
+    if (dx === 0 && dy === 0 && this.hasLast) {
+      dx = e.clientX - this.lastX;
+      dy = e.clientY - this.lastY;
+    }
+    this.lastX = e.clientX;
+    this.lastY = e.clientY;
+    this.hasLast = true;
+    // One gigantic delta (refocussed tab, a drag resumed far away) used to read as "the
+    // sensitivity spikes while the mouse button is held". A single event may never spin the camera.
+    const step = LOOK_PER_PIXEL * this.sensitivity;
+    this.lookDX += clampStep(dx * step);
+    this.lookDY += clampStep(dy * step) * (this.invertY ? -1 : 1);
   };
 
   private wheelHandler = (e: WheelEvent) => {
@@ -200,82 +244,61 @@ export class Input {
     this.onWheel?.(Math.sign(e.deltaY));
   };
 
-  private lockChange = () => {
-    this.pendingRequest = false;
-    this.locked = document.pointerLockElement === this.canvas;
-    if (this.locked && performance.now() < this.releaseOnGrantUntil) {
-      // a grant we no longer want (a card asked for the cursor while it was in flight) — hand it back
-      this.releaseOnGrantUntil = 0;
-      this.expectUnlock = true;
-      document.exitPointerLock();
-      return;
-    }
-    if (this.locked) {
-      // drop the recentring spike and everything banked while the pointer was free
-      this.lookDX = 0;
-      this.lookDY = 0;
-      this.settleUntil = performance.now() + LOCK_SETTLE_MS;
-    } else {
-      this.mining = false;
-      this.placing = false;
-      this.down.clear();
-    }
-    if (this.expectUnlock) {
-      // We handed the mouse to a panel / tutorial card on purpose; the app already knows
-      // and must not read this as "the player lost the pointer" (= open the pause screen).
-      this.expectUnlock = false;
-      return;
-    }
-    this.onLockChange?.(this.locked);
-  };
-
   private gamepadChange = () => {
     this.gamepadConnected = navigator.getGamepads?.().some((p) => !!p) ?? false;
   };
 
-  /**
-   * Take the pointer. Chrome paints its "Your mouse pointer is hidden…" banner whenever a page
-   * grabs the pointer *without* user activation (after an `await`, from a timer, …), so a
-   * request outside a click/keypress is remembered instead of fired — the next real click takes it.
-   */
-  requestLock(): void {
-    if (!this.canvas || this.locked) return;
-    if (this.uiCapture || !this.hasGesture()) {
-      this.wantLock = true;
+  /** Take the mouse: hide the cursor, movement drives the camera. No browser banner involved. */
+  capture(): void {
+    if (this.locked) return;
+    this.wantCapture = false;
+    this.setCaptured(true, false);
+  }
+
+  /** Give the cursor back (menu, panel, focus loss). */
+  release(): void {
+    this.wantCapture = false;
+    if (this.locked) this.setCaptured(false, false);
+  }
+
+  /** The world wants the mouse; the next click into it captures (used right after loading). */
+  requestCapture(): void {
+    if (!this.locked) this.wantCapture = true;
+  }
+
+  private setCaptured(on: boolean, silent: boolean): void {
+    const changed = this.locked !== on;
+    this.locked = on;
+    this.lookDX = 0;
+    this.lookDY = 0;
+    this.hasLast = false;
+    if (!on) {
+      this.mining = false;
+      this.placing = false;
+    }
+    if (typeof document !== 'undefined') document.body?.classList.toggle('mouse-captured', on);
+    if (silent || this.expectUnlock) {
+      this.expectUnlock = false;
       return;
     }
-    this.wantLock = false;
-    this.pendingRequest = true;
-    const p = this.canvas.requestPointerLock?.() as unknown as Promise<void> | undefined;
-    if (p && typeof p.catch === 'function') p.catch(() => undefined);
+    if (changed) this.onLockChange?.(on);
   }
 
-  /** True while the browser considers us inside a user gesture (click / key press). */
-  hasGesture(): boolean {
-    const ua = (navigator as { userActivation?: { isActive?: boolean } }).userActivation;
-    if (typeof ua?.isActive === 'boolean') return ua.isActive;
-    return performance.now() - this.gestureAt < 1200;
+  /** Public event seams: `attach()` binds these, and tests/embedders can drive them directly. */
+  handleKeyDown(e: KeyboardEvent): void {
+    this.keyDown(e);
   }
 
-  /**
-   * Record that we are answering a click/keypress. Browsers without `navigator.userActivation`
-   * fall back to this; UI code that takes the pointer right inside a click handler calls it.
-   */
-  markGesture(): void {
-    this.gestureAt = performance.now();
+  handleKeyUp(e: KeyboardEvent): void {
+    this.keyUp(e);
   }
 
-  exitLock(): void {
-    this.wantLock = false;
-    this.expectUnlock = true;
-    if (document.pointerLockElement) {
-      document.exitPointerLock();
-      return;
-    }
-    // Not locked yet, but a request may still land on the next frame: remember to hand the cursor
-    // back when it does (that is what used to leave a UI card behind a captured pointer). Only a
-    // genuinely pending request counts, or the *next* legit capture would be released too.
-    if (this.pendingRequest) this.releaseOnGrantUntil = performance.now() + 750;
+  handleMouseMove(e: MouseEvent): void {
+    this.mouseMove(e);
+  }
+
+  handleWheel(e: WheelEvent): void {
+    this.wheelHandler(e);
   }
 
   isDown(code: string): boolean {
@@ -305,13 +328,13 @@ export class Input {
   move(): MoveState {
     let forward = (this.isDown('KeyW') ? 1 : 0) - (this.isDown('KeyS') ? 1 : 0);
     let right = (this.isDown('KeyD') ? 1 : 0) - (this.isDown('KeyA') ? 1 : 0);
-    let jump = this.isDown('Space') || this.touch.jump;
+    let jump = this.isDown('Space') || performance.now() - this.jumpPressedAt < JUMP_BUFFER_MS || this.touch.jump;
     let sneak = this.isDown('ShiftLeft') || this.touch.sneak;
     let up = this.touch.up;
     let down = this.touch.down || this.isDown('KeyC');
 
-    if (this.gamepadConnected) this.pollGamepad();
     if (this.gamepadConnected) {
+      this.pollGamepad();
       const dead = (v: number) => (Math.abs(v) > 0.22 ? v : 0);
       const ax = dead(this.gamepadAxes[0]);
       const ay = dead(this.gamepadAxes[1]);
@@ -329,7 +352,7 @@ export class Input {
       const ly = dead(this.gamepadAxes[3]);
       if (lx !== 0 || ly !== 0) {
         this.lookDX += lx * 0.055;
-        this.lookDY += ly * 0.045;
+        this.lookDY += ly * 0.044;
       }
     }
 
@@ -340,6 +363,8 @@ export class Input {
     if (this.touch.mine) this.mining = true;
     if (this.touch.place) this.placing = true;
 
+    // Sprint aliases: Ctrl+W (classic), Caps Lock, or double-tap W. On macOS Ctrl+Space is the
+    // system "switch input source" shortcut, so the plain Ctrl combo cannot be the only way.
     const sprint =
       this.isDown('ControlLeft') ||
       this.isDown('ControlRight') ||
@@ -365,9 +390,8 @@ export class Input {
   }
 
   /**
-   * Take or give up keyboard/mouse ownership (menus, panels, tutorial cards).
-   * Handing ownership over clears every held key, otherwise a player who opens a panel
-   * while running keeps running forever.
+   * Take or give up keyboard/mouse ownership (menus, panels). Handing ownership over clears every
+   * held key, otherwise a player who opens a panel while running keeps running forever.
    */
   setActive(on: boolean): void {
     if (this.active === on) return;
@@ -376,6 +400,7 @@ export class Input {
       this.down.clear();
       this.endActions();
       this.sprintHold = false;
+      this.release(); // menus need a visible, clickable cursor
     }
   }
 }

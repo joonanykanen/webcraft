@@ -3,10 +3,11 @@
  * scene with its own camera and composited as a second pass. That keeps it immune to terrain depth
  * (no clipping when the player stares at a block) and lets swings animate independently.
  *
- * The arm is a single group laid along its own -z: sleeve (far) → hand (near) → held item at the
- * grip, so one transform brings the limb in from the bottom-right corner and reaches it up-left —
- * which is how a first-person arm reads. Blocks are voxel cubes; tools and food reuse the flat
- * atlas art the inventory already shows.
+ * Geometry of a first-person arm, which is what an earlier version of this file got backwards: the
+ * **elbow/sleeve end is closest to the eye** (so it is large and runs off the bottom-right corner of
+ * the frame) and the **hand is the far end** (so it is smaller and sits low-centre). The limb is one
+ * group laid along its own -z axis, from the near sleeve to the far hand, with the held item gripped
+ * at the hand; a punch extends that axis and pitches the wrist.
  */
 import * as THREE from 'three';
 import { block } from '../world/blocks.js';
@@ -15,21 +16,38 @@ import { TILE } from '../world/tiles.js';
 import { paintItem } from '../ui/icons.js';
 import { voxelCubeGeometry } from './geometry.js';
 
-const SWING_SECONDS = 0.3;
+const SWING_SECONDS = 0.26;
 
-/* View-model proportions in view units (the camera's near plane is 0.01). */
-const ARM_W = 0.07; // limb cross-section
-const SLEEVE_LEN = 0.24; // half-length of the sleeve segment (upper arm, farthest away)
-const HAND_LEN = 0.19; // half-length of the skin segment (forearm + hand, nearest)
-const SLEEVE_Z = -0.92; // segment centres measured along the limb
-const HAND_Z = -0.52;
-const GRIP_Z = -0.5; // held item sits at the hand's tip, in front of the sleeve
-const LIMB_AT: [number, number, number] = [0.34, -0.36, -0.34];
-const LIMB_SCALE = 0.85; // one knob for the overall size of the arm in frame
-const LIMB_ROT: [number, number, number] = [0.22, 0.42, -0.2];
-const BLOCK_SIZE = 0.075; // half-size of a held block cube
-const SPRITE_SIZE = 0.17; // held items drawn as flat art
-const TOOL_TILT = -0.5; // rotate tools so they read as gripped, not stuck on
+/* ---- layout in camera space (the camera looks down its own -z; 1 unit ≈ 1 block) ---- */
+/** Just outside the bottom-right corner: where the arm "comes from". */
+const ELBOW_AT = new THREE.Vector3(0.66, -0.6, -0.4);
+/** Low-centre-right, further away: the hand, which is the far end of the limb. */
+const HAND_AT = new THREE.Vector3(0.18, -0.24, -1.0);
+
+/* ---- segment sizes, measured on the limb's own axes (all half-extents) ----
+ * A first-person arm is a long *sleeve* with a stubby hand cube on the end; making the skin
+ * segment long instead is what turned it into a plank. */
+const SLEEVE_W = 0.07; // upper arm, seen close up, so a touch wider
+const HAND_W = 0.072; // hand cube at the far end — wide enough that the skin stays visible in
+// front of a carried block instead of vanishing behind it, stubby enough to read as a fist
+const SLEEVE_Z = -0.3; // centre of the sleeve segment on the limb axis
+const SLEEVE_LEN = 0.25;
+const HAND_Z = -0.55; // centre of the hand segment (overlaps the sleeve: no floating wrist)
+const HAND_LEN = 0.045; // ≈ a cube: a long skin segment reads as a plank, not a hand
+const HAND_ROLL = 0.55; // spin the fist so its edges face the eye: dead-on, a cube is a flat plate
+const GRIP_Z = -0.62; // held item is gripped over the knuckles: near enough that the hand is
+// drawn in front of it, far enough that the item still reads as held rather than fused to the arm
+const GRIP_X = 0.02; // held items hang slightly outside and below the wrist, not dead-centre
+const GRIP_Y = -0.045;
+const BLOCK_SIZE = 0.085; // held block cube, about hand-sized (as in vanilla)
+const SPRITE_SIZE = 0.17; // held items drawn as flat art: 16 px of atlas, so keep it small and crisp
+const TOOL_TILT = -0.2; // a slight lean only: the tool art is already diagonal, and a big second
+// tilt turned a 16 px sprite into a staircase of pixels
+const BOB_X = 0.016;
+const BOB_Y = 0.013;
+/** Punch amplitude: how far the arm extends and how far the wrist pitches. */
+const PUNCH_REACH = 0.3;
+const PUNCH_PITCH = 0.85;
 
 const clamp01 = (v: number) => (v < 0 ? 0 : v > 1 ? 1 : v);
 
@@ -40,6 +58,9 @@ export class HandViewModel {
   visible = true;
 
   private readonly limb = new THREE.Group();
+  /** Rest orientation: local -z runs from the elbow (near) to the hand (far). */
+  private readonly restQuat = new THREE.Quaternion();
+  private readonly restAt = new THREE.Vector3();
   private readonly sleeve: THREE.Mesh;
   private readonly hand: THREE.Mesh;
   private readonly block: THREE.Mesh;
@@ -56,13 +77,20 @@ export class HandViewModel {
   constructor(private readonly material: THREE.ShaderMaterial) {
     this.camera = new THREE.PerspectiveCamera(62, 16 / 9, 0.01, 6);
 
-    const seg = (halfLen: number, z: number, tile: number, tint: number) => {
+    // Orientation of the whole limb: point local -z from the elbow towards the hand.
+    const dir = HAND_AT.clone().sub(ELBOW_AT).normalize();
+    this.restQuat.setFromUnitVectors(new THREE.Vector3(0, 0, -1), dir);
+    this.restAt.copy(ELBOW_AT);
+    /** Undo the limb orientation, so children can be aligned with the screen again. */
+    const flat = this.restQuat.clone().invert();
+
+    const seg = (halfLen: number, z: number, tile: number, width: number, tint: number) => {
       const mesh = new THREE.Mesh(
         voxelCubeGeometry({
           top: tile,
           bottom: tile,
           side: tile,
-          scale: [ARM_W, ARM_W, halfLen * 2],
+          scale: [width, width, halfLen * 2],
           centered: true,
           shade: 1,
           sky: 15,
@@ -75,17 +103,18 @@ export class HandViewModel {
       this.limb.add(mesh);
       return mesh;
     };
-    // sleeve first: the hand's near end overlaps it, and both share the cross-section
-    this.sleeve = seg(SLEEVE_LEN, SLEEVE_Z, TILE.SLEEVE, 1);
-    this.hand = seg(HAND_LEN, HAND_Z, TILE.HAND, 1);
+    // sleeve first (nearest the eye, running off the corner), then the hand at the far end
+    this.sleeve = seg(SLEEVE_LEN, SLEEVE_Z, TILE.SLEEVE, SLEEVE_W, 1);
+    this.hand = seg(HAND_LEN, HAND_Z, TILE.HAND, HAND_W, 1);
+    this.hand.scale.set(1, 0.8, 1); // palm seen from above: flatter than it is wide
+    this.hand.rotateZ(HAND_ROLL);
 
     this.block = new THREE.Mesh(
       voxelCubeGeometry({ top: 3, bottom: 3, side: 3, size: BLOCK_SIZE, centered: true, sky: 15 }),
       this.material,
     );
     this.block.frustumCulled = false;
-    this.block.rotation.set(-0.3, 0.6, 0.1);
-    this.block.position.set(0.02, 0.06, GRIP_Z);
+    this.block.position.set(GRIP_X, GRIP_Y, GRIP_Z);
     this.block.visible = false;
     this.limb.add(this.block);
 
@@ -93,21 +122,31 @@ export class HandViewModel {
       transparent: true,
       alphaTest: 0.35,
       side: THREE.DoubleSide,
-      depthTest: false,
+      // Keep depth testing on: the item must be occluded by the hand that holds it, otherwise it
+      // floats in mid-air in front of the arm.
+      depthTest: true,
       depthWrite: false,
     });
     this.sprite = new THREE.Mesh(new THREE.PlaneGeometry(SPRITE_SIZE, SPRITE_SIZE), this.spriteMat);
     this.sprite.frustumCulled = false;
-    // sit it at the tip of the hand and counter-rotate the limb's yaw, otherwise the flat art is
-    // seen edge-on and collapses into a sliver
-    this.sprite.position.set(-0.02, 0.07, GRIP_Z + 0.08);
-    this.sprite.rotation.set(0, -LIMB_ROT[1] + 0.15, 0);
+    this.sprite.position.set(GRIP_X * 0.7, GRIP_Y, GRIP_Z);
     this.sprite.visible = false;
     this.limb.add(this.sprite);
 
-    this.limb.position.set(...LIMB_AT);
-    this.limb.rotation.set(...LIMB_ROT);
-    this.limb.scale.setScalar(LIMB_SCALE);
+    // Flat art and held cubes must not be seen edge-on: undo the limb's tilt so they face the eye,
+    // then add a small tilt of their own so they still look held rather than pasted on.
+    const face = (o: THREE.Object3D, tilt: number) => {
+      o.quaternion.copy(flat);
+      o.rotateZ(tilt);
+      o.rotateX(0.16);
+    };
+    face(this.sprite, 0);
+    this.block.quaternion.copy(flat);
+    this.block.rotateY(0.62);
+    this.block.rotateX(-0.2);
+
+    this.limb.position.copy(this.restAt);
+    this.limb.quaternion.copy(this.restQuat);
     this.scene.add(this.limb);
   }
 
@@ -141,13 +180,33 @@ export class HandViewModel {
       this.spriteMat.needsUpdate = true;
       this.sprite.visible = true;
       // tools read better tilted (a gripped handle); food and misc stay face-on
-      this.sprite.rotation.z = id >= 200 && id < 240 ? TOOL_TILT : 0;
+      this.spriteMat.color.setRGB(1, 1, 1);
+      const flat = this.restQuat.clone().invert();
+      const isTool = id >= 200 && id < 240;
+      this.sprite.quaternion.copy(flat);
+      // A 16 px sprite skewed in 3D staircases its own pixels (the pickaxe read as a broken
+      // zig-zag), so held art stays parallel to the screen and only turns in 2D. Tools are drawn
+      // diagonally in the atlas already, so tilting them again doubled the diagonal.
+      this.sprite.rotateZ(isTool ? TOOL_TILT : 0.12);
+      this.sprite.rotateX(0.1);
+      this.sprite.scale.setScalar(isTool ? 1.2 : 1);
+      this.sprite.position.set(GRIP_X * 0.7 + (isTool ? 0.028 : 0), GRIP_Y + (isTool ? 0.055 : 0), GRIP_Z);
     }
   }
 
   /** Kick off a swing (mining tick, attack, placing, eating — BI-2/BI-3). */
   swing(): void {
     this.swingTimer = SWING_SECONDS;
+  }
+
+  /** Debug/smoke accessor: camera-space position of the limb root (punch travel check). */
+  get limbPosition(): [number, number, number] {
+    const p = this.limb.position;
+    return [p.x, p.y, p.z];
+  }
+
+  get swinging(): boolean {
+    return this.swingTimer > 0;
   }
 
   setAspect(aspect: number): void {
@@ -157,26 +216,31 @@ export class HandViewModel {
 
   /**
    * @param dt seconds
-   * @param bob walk-cycle phase in [0,1) (Player.bobPhase) — the arm sways with the steps
+   * @param bob walk-cycle phase in radians (Game.bobPhase) — the arm sways with the steps
    * @param dayLight sky brightness from the day/night curve, to dim the held item at night
    */
   update(dt: number, bob: number, dayLight: number): void {
     const t = 1 - clamp01(this.swingTimer / SWING_SECONDS);
-    const arc = this.swingTimer > 0 ? Math.sin(t * Math.PI) : 0; // fast down, slow recovery
-    const walking = bob >= 0;
-    const step = walking ? Math.sin(bob * Math.PI * 2) : 0;
-    const sway = walking ? Math.cos(bob * Math.PI * 2) : 0;
+    const arc = this.swingTimer > 0 ? Math.sin(t * Math.PI) : 0; // out and back in one arc
+
+    // The bob is a walk rhythm; while a punch plays the arm ignores it (otherwise the punch wobbles).
+    const step = Math.sin(bob * Math.PI * 2);
+    const sway = Math.cos(bob * Math.PI * 2);
+    const idle = this.swingTimer > 0 ? 0 : 1;
 
     this.limb.position.set(
-      LIMB_AT[0] + sway * 0.014,
-      LIMB_AT[1] + step * 0.018 - 0.17 * arc,
-      LIMB_AT[2] + 0.1 * arc,
+      this.restAt.x + sway * BOB_X * idle,
+      this.restAt.y + step * BOB_Y * idle,
+      this.restAt.z,
     );
-    this.limb.rotation.set(LIMB_ROT[0] - 1.0 * arc, LIMB_ROT[1] - 0.3 * arc, LIMB_ROT[2] - 0.1 * arc);
+    this.limb.quaternion.copy(this.restQuat);
+    this.limb.rotateX(-PUNCH_PITCH * arc); // wrist comes down and the arm straightens
+    this.limb.rotateZ(-0.18 * arc);
+    this.limb.translateZ(-PUNCH_REACH * arc); // extend along the arm's own axis
     this.limb.updateMatrixWorld();
 
-    const shade = 0.35 + clamp01(dayLight) * 0.65;
-    this.spriteMat.color.setScalar(shade);
+    const shade = 0.4 + clamp01(dayLight) * 0.6;
+    this.spriteMat.color.setRGB(shade, shade, shade);
 
     if (this.swingTimer > 0) this.swingTimer = Math.max(0, this.swingTimer - dt);
   }
@@ -200,11 +264,10 @@ export class HandViewModel {
     canvas.height = 64;
     paintItem(canvas, id);
     const tex = new THREE.CanvasTexture(canvas);
-    // the canvas holds sRGB bytes; without this the sprite is treated as linear and washes out
-    tex.colorSpace = THREE.SRGBColorSpace;
     tex.magFilter = THREE.NearestFilter;
     tex.minFilter = THREE.NearestFilter;
     tex.generateMipmaps = false;
+    tex.colorSpace = THREE.SRGBColorSpace; // the icon art is sRGB; without this it washes out
     this.spriteCache.set(id, tex);
     return tex;
   }

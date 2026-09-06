@@ -491,17 +491,17 @@ function drawTile(t: Tile): void {
     }
     // ---- view model (the player's own arm/sleeve, VII) ----
     case TILE.HAND: {
-      t.base([228, 180, 142], 7);
-      t.rect(0, 0, 15, 2, [206, 156, 120]);
-      t.rect(3, 7, 12, 8, [198, 148, 114]); // knuckles
-      t.rect(3, 12, 12, 13, [206, 156, 120]);
+      // The view model maps this over a small cube: keep it mostly skin so it reads as a hand and
+      // not as a wood block (one knuckle line is all that survives at that size).
+      t.base([232, 186, 148], 5);
+      t.rect(2, 6, 13, 7, [214, 166, 128]);
+      t.rect(2, 13, 13, 14, [244, 204, 168]);
       break;
     }
     case TILE.SLEEVE: {
-      t.base([76, 120, 168], 8);
-      t.rect(0, 0, 15, 1, [58, 96, 140]);
-      t.rect(0, 14, 15, 15, [58, 96, 140]);
-      for (let i = 0; i < 10; i++) t.set((r() * 16) | 0, 3 + ((r() * 10) | 0), [92, 138, 186]);
+      t.base([72, 116, 164], 6);
+      t.rect(0, 0, 15, 2, [56, 92, 136]); // shoulder seam
+      t.rect(0, 13, 15, 15, [92, 138, 186]); // cuff
       break;
     }
     default: {

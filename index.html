@@ -32,7 +32,16 @@
         </div>
 
         <div id="hotbar" role="toolbar" aria-label="Hotbar"></div>
-        <div id="lock-hint" class="hidden">Click the world to capture the mouse</div>
+
+        <!-- UI-6: the next milestone, always visible while playing -->
+        <div id="milestone-tracker" class="hidden">
+          <canvas class="milestone-icon" width="32" height="32"></canvas>
+          <div>
+            <div class="milestone-label">Next goal</div>
+            <div class="milestone-title"></div>
+            <div class="milestone-goal"></div>
+          </div>
+        </div>
 
         <div id="debug" class="hidden"></div>
         <div id="toasts" aria-live="polite"></div>
@@ -49,18 +58,6 @@
           <button class="touch-btn" data-touch="down" aria-label="Fly down">↓</button>
           <button class="touch-btn" data-touch="mine" aria-label="Mine">⛏</button>
           <button class="touch-btn" data-touch="place" aria-label="Place">▣</button>
-        </div>
-      </div>
-
-      <!-- ========================== tutorial ============================= -->
-      <div id="tutorial" class="hidden">
-        <div id="tutorial-card">
-          <h2 id="tutorial-title"></h2>
-          <p id="tutorial-body"></p>
-          <div class="row">
-            <button id="tutorial-skip" class="btn ghost">Skip tutorial</button>
-            <button id="tutorial-next" class="btn primary">Next</button>
-          </div>
         </div>
       </div>
 
@@ -152,12 +149,13 @@
               <ul class="keys">
                 <li><kbd>W</kbd><kbd>A</kbd><kbd>S</kbd><kbd>D</kbd> Move</li>
                 <li><kbd>Space</kbd> Jump / swim up</li>
-                <li><kbd>W</kbd>&times;2, <kbd>Caps Lock</kbd> or <kbd>Ctrl</kbd> Sprint</li>
+                <li><kbd>W</kbd>&times;2, <kbd>Caps Lock</kbd> or <kbd>Ctrl</kbd>+<kbd>W</kbd> Sprint</li>
                 <li><kbd>Shift</kbd> Sneak (won't walk off edges)</li>
                 <li><kbd>Space</kbd>×2 Toggle flight (creative)</li>
                 <li><kbd>Space</kbd>/<kbd>Shift</kbd> Fly up/down</li>
                 <li><kbd>E</kbd> Inventory &amp; crafting</li>
-                <li><kbd>Esc</kbd> Pause / release mouse</li>
+                <li><kbd>Esc</kbd> Pause, then <kbd>Esc</kbd> again to resume</li>
+                <li><kbd>Click</kbd> Hand the mouse to the world (cursor hides; menus get it back)</li>
               </ul>
             </div>
             <div class="card">
@@ -181,6 +179,7 @@
                 <li>Better tools mine faster; some ores need a better pickaxe.</li>
                 <li>Watch hearts &amp; hunger. Apples drop from leaves.</li>
                 <li>Hostile mobs appear in the dark at night — light up your base.</li>
+                <li>The next goal sits above the hotbar; <em>Milestones</em> lists the whole chain.</li>
                 <li>Autosave runs every 30 s; the world survives a refresh.</li>
               </ul>
             </div>
@@ -212,6 +211,7 @@
             <h1 class="logo small">Paused</h1>
             <div class="col">
               <button id="btn-resume" class="btn primary big">Resume</button>
+              <button id="btn-milestones" class="btn">Milestones</button>
               <button id="btn-save" class="btn">Save now</button>
               <button id="btn-pause-settings" class="btn">Settings</button>
               <button id="btn-quit" class="btn ghost">Save &amp; quit to menu</button>
@@ -231,10 +231,31 @@
           </div>
         </section>
 
+        <!-- UI-6: milestone (achievement) progression -->
+        <section id="screen-milestones" class="screen wide">
+          <header class="screen-head">
+            <h1>Milestones</h1>
+            <div class="row">
+              <span id="milestones-count" class="muted tiny"></span>
+              <button class="btn small" id="btn-close-milestones">Back (Esc)</button>
+            </div>
+          </header>
+          <p class="muted tiny" style="margin-top: 0">
+            Goals are unlocked by playing — the chain leads from your first log to a pickaxe of gems.
+          </p>
+          <div id="milestones-grid"></div>
+        </section>
+
         <!-- inventory / crafting -->
         <section id="panel-inventory" class="screen panel">
           <div class="panel-box">
-            <header class="screen-head"><h1 id="inv-title">Inventory</h1><button class="btn small" id="btn-close-inv">Close (E)</button></header>
+            <header class="screen-head">
+              <h1 id="inv-title">Inventory</h1>
+              <div class="row">
+                <button class="btn small" id="btn-inv-milestones">Milestones</button>
+                <button class="btn small" id="btn-close-inv">Close (E)</button>
+              </div>
+            </header>
             <div class="inv-layout">
               <div class="inv-left">
                 <div class="craft-area">

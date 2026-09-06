@@ -64,4 +64,44 @@ describe('voxelCubeGeometry', () => {
     expect(tint.getX(5 * 4)).toBeCloseTo(1.4);
     expect(tint.getX(0)).toBeCloseTo(1);
   });
+
+  /**
+   * Regression (mob faces were upside-down): the atlas is painted upright while the chunk face
+   * basis runs `v` downwards, so a mob head needs its V axis flipped or the snout lands above the
+   * eyes. Flipping must never move geometry, and corners must stay inside the fract() range.
+   */
+  describe('flipV (entity faces)', () => {
+    const uvs = (g: THREE.BufferGeometry) => (g.getAttribute('aUV') as THREE.BufferAttribute).array as Float32Array;
+    const positions = (g: THREE.BufferGeometry) => (g.getAttribute('position') as THREE.BufferAttribute).array as Float32Array;
+    /** The four V coordinates of the local -z face (face 5 → vertices 20…23), i.e. a mob's face. */
+    const frontV = (g: THREE.BufferGeometry) => Array.from(uvs(g)).slice(20 * 2, 24 * 2).filter((_, i) => i % 2 === 1);
+
+    it('mirrors the face vertically without touching the geometry', () => {
+      const opts = { size: 1, top: 1, bottom: 1, side: 2, front: 3 };
+      const plain = voxelCubeGeometry(opts);
+      const flipped = voxelCubeGeometry({ ...opts, flipV: true });
+      const p = frontV(plain);
+      const f = frontV(flipped);
+      expect(p[0]).toBe(0);
+      expect(p[2]).toBeGreaterThan(0.9);
+      expect(f).toEqual([p[2], p[2], 0, 0]); // exactly mirrored
+      expect(Array.from(positions(flipped))).toEqual(Array.from(positions(plain)));
+    });
+
+    it('keeps every UV corner strictly inside the tile so fract() cannot collapse the face', () => {
+      const g = voxelCubeGeometry({ size: 1, top: 4, bottom: 5, side: 6, front: 7, flipV: true });
+      const all = Array.from(uvs(g));
+      expect(Math.min(...all)).toBe(0);
+      const max = Math.max(...all);
+      expect(max).toBeGreaterThan(0.9);
+      expect(max).toBeLessThan(1); // exactly 1.0 would wrap to 0 and flatten the texture
+    });
+
+    it('is opt-in, so terrain tiles keep their existing mapping', () => {
+      const a = voxelCubeGeometry({ size: 1, top: 0, bottom: 0, side: 0 });
+      const b = voxelCubeGeometry({ size: 1, top: 0, bottom: 0, side: 0, flipV: false });
+      expect(Array.from(uvs(a))).toEqual(Array.from(uvs(b)));
+      expect(frontV(a)).toEqual([0, 0, frontV(a)[2], frontV(a)[2]]);
+    });
+  });
 });

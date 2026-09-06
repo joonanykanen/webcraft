@@ -84,10 +84,14 @@ export class Player {
   }
 
   look(dx: number, dy: number): void {
+    // One non-finite delta anywhere in the chain would make every later coordinate NaN and the whole
+    // world unplayable, so drop bad input instead of propagating it.
+    if (!Number.isFinite(dx) || !Number.isFinite(dy)) return;
     this.yaw -= dx;
     this.pitch -= dy;
     const limit = Math.PI / 2 - 0.02;
     this.pitch = clamp(this.pitch, -limit, limit);
+    if (this.yaw > Math.PI * 4 || this.yaw < -Math.PI * 4) this.yaw %= Math.PI * 2;
   }
 
   forward(): Vec3 {

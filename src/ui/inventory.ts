@@ -87,6 +87,8 @@ export interface InventoryBindings {
   hasTable: () => boolean;
   chestSlots: () => Slot[] | null;
   onChanged: () => void;
+  /** UI-6: a recipe was taken out of the grid (feeds the milestone chain). */
+  onCraft?: (itemId: number, times: number) => void;
   craftSound: () => void;
   notify: (text: string, kind?: 'info' | 'warn' | 'good') => void;
 }
@@ -292,6 +294,7 @@ export class InventoryUI {
     if (!grid.current()) return;
     const out = grid.craft();
     if (!out) return;
+    this.b.onCraft?.(out.id, 1);
     const inv = this.b.inventory;
     const cur = inv.cursor;
     if (cur && cur.id === out.id && !toolOf(out.id)) {

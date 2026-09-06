@@ -30,6 +30,12 @@ export interface CubeOptions {
   tints?: number[];
   /** non-uniform size in blocks; overrides the uniform `size` when given */
   scale?: [number, number, number];
+  /**
+   * Flip the texture's V axis. The chunk face basis runs `v` downwards, so art painted "upright"
+   * into the atlas (mob faces: eyes above the snout) renders upside-down on a cube unless the
+   * entity flips it back. Terrain tiles are near-symmetric, so only entities need this.
+   */
+  flipV?: boolean;
 }
 
 /** Index of the local -z face inside `FACES` (+y, -y, +x, -x, +z, -z): the direction a mob faces. */
@@ -81,7 +87,8 @@ export function voxelCubeGeometry(opts: CubeOptions): THREE.BufferGeometry {
       // The chunk shader wraps aUV with fract() so one face can tile a greedy run. A corner at
       // exactly 1.0 therefore wraps back to 0, which collapsed entity faces onto a handful of
       // texels (mobs looked flat-coloured, held blocks wrong). Stay just inside the range.
-      uv.push(a === 1 ? UV_MAX : a, b === 1 ? UV_MAX : b);
+      const vv = opts.flipV ? 1 - b : b;
+      uv.push(a === 1 ? UV_MAX : a, vv === 1 ? UV_MAX : vv);
       tile.push(tileIndex);
       light.push(sky, blk);
       tint.push(t);
