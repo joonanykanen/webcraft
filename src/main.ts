@@ -11,6 +11,7 @@ import { Hud, type HudSlotView } from './ui/hud.js';
 import { InventoryUI, type InventoryBindings } from './ui/inventory.js';
 import { loadSettings, Menus, saveSettings, type MenuCallbacks } from './ui/menus.js';
 import { BlockId } from './world/blocks.js';
+import { TILE } from './world/tiles.js';
 
 const canvas = must<HTMLCanvasElement>('viewport');
 const settings: Settings = loadSettings();
@@ -29,7 +30,15 @@ let playing = false;
 /** Live handle for the console (`webcraft.game.world.getBlock(...)`) and the browser smoke test. */
 declare global {
   interface Window {
-    webcraft?: { readonly game: Game | null; readonly BlockId: typeof BlockId; readonly version: string };
+    webcraft?: {
+      readonly game: Game | null;
+      readonly BlockId: typeof BlockId;
+      readonly TILE: typeof TILE;
+      readonly version: string;
+      readonly build: string;
+      /** Sweep every inventory slot's icon against what the slot actually holds, repair and report. */
+      readonly auditUI: () => string;
+    };
   }
 }
 
@@ -46,7 +55,19 @@ function notify(text: string, kind: 'info' | 'warn' | 'good' = 'info'): void {
 // ------------------------------------------------------------ boot (MM-5 capability probe)
 function boot(): void {
   // Debug/inspection surface used by the smoke tests and the probes in scripts/.
-  window.webcraft = { get game(): Game | null { return game; }, BlockId, version: '1.0.0' };
+  window.webcraft = {
+    get game(): Game | null {
+      return game;
+    },
+    BlockId,
+    TILE,
+    version: '1.0.0',
+    build: __BUILD_ID__,
+    auditUI: () => invUI?.auditPainting() ?? 'no inventory panel is open',
+  };
+  // Which build is this? Shown under the title so "still broken" can be answered before anything else.
+  const stamp = document.getElementById('build-stamp');
+  if (stamp) stamp.textContent = __BUILD_ID__;
   hud = new Hud();
   menus = new Menus(menuCallbacks(), settings);
   const probe = Renderer.probe();
@@ -385,6 +406,10 @@ function onScreen(s: Screen): void {
     case 'inventory':
       invUI = new InventoryUI(bindings());
       invUI.build('inventory');
+      // Self-check on open: a slot whose pixels do not match its contents is repainted and reported in
+      // the console — see InventoryUI.auditPainting() (the "ghost items" report).
+      const audit = invUI.auditPainting();
+      if (audit !== 'all slots paint their own item') console.warn('[WebCraft] inventory paint audit:', audit);
       menus.show('inventory');
       hud.setVisible(false);
       break;
@@ -421,6 +446,9 @@ function startHudLoop(): void {
   hud.resetMilestones(); // a fresh world starts with an unpinned goal card
   hudTimer = window.setInterval(() => {
     if (!game || !playing) return;
+    // The stack riding the cursor belongs to the inventory, not to a slot: refresh it from the model
+    // rather than trusting that every code path which touched it also raised a change event.
+    invUI?.syncCursor();
     const m = game.hudModel();
     const hotbar: (HudSlotView | null)[] = [];
     for (let i = 0; i < 9; i++) {

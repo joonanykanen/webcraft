@@ -1342,6 +1342,61 @@ async function main() {
       return 'up on resume → gone after 14 s → back after a panel → pinned by Tab → faded again';
     });
 
+    await step('no slot or cursor ghost shows an item it does not hold (UI-7)', async () => {
+      // The report: after crafting and dragging stacks, icons appeared in empty slots and followed the
+      // cursor — painted canvases that no longer matched the model. Two structural fixes: a slot commits
+      // its cache stamp only after a successful paint (and clears itself when empty), and the stack that
+      // rides the cursor is re-synced from the model every tick instead of on change events. On top of
+      // that the panel verifies its own pixels when it opens (InventoryUI.auditPainting) — so prove the
+      // guard works instead of assuming the bug is gone.
+      await page.keyboard.press('KeyE');
+      await page.waitForFunction(isActive('panel-inventory'), null, { timeout: 5000 });
+      const clean = await page.evaluate(() => window.webcraft.auditUI());
+      check('every slot paints the item it holds', clean === 'all slots paint their own item', clean);
+
+      // Sabotage the first main-inventory slot regardless of what it holds: paint it solid magenta and
+      // force the canvas visible. That is precisely the reported artefact — art that does not belong to
+      // the slot — and it works whether the slot holds an item or nothing at all.
+      const sabotage = await page.evaluate(() => {
+        const slot = document.querySelector('#inv-main .slot canvas');
+        if (!slot) return null;
+        const ctx = slot.getContext('2d');
+        ctx.fillStyle = '#f0f';
+        ctx.fillRect(0, 0, slot.width, slot.height);
+        slot.style.visibility = 'visible';
+        return slot.width + 'px slot canvas painted solid magenta';
+      });
+      if (!sabotage) throw new Error('no slot canvas in #inv-main to sabotage');
+      const caught = await page.evaluate(() => window.webcraft.auditUI());
+      check('a stale canvas is detected', /stale/.test(caught), sabotage + ' -> caught');
+      const repaired = await page.evaluate(() => window.webcraft.auditUI());
+      check('and repainted from the model on the spot', repaired === 'all slots paint their own item', repaired);
+
+      // The cursor stack is the other half of the report: paint it, empty the model without telling the
+      // UI, and the frame-synced ghost must still disappear.
+      const ghost = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const first = g.inventory.main.find((s) => s);
+        g.inventory.cursor = { id: first ? first.id : 1, count: 3 };
+        await new Promise((r) => setTimeout(r, 260)); // one HUD tick
+        const riding = !document.getElementById('cursor-stack').classList.contains('hidden');
+        g.inventory.cursor = null; // the path that used to be able to leave a ghost behind
+        await new Promise((r) => setTimeout(r, 260));
+        const still = !document.getElementById('cursor-stack').classList.contains('hidden');
+        const canvas = document.querySelector('#cursor-stack canvas');
+        const d = canvas.getContext('2d').getImageData(0, 0, canvas.width, canvas.height).data;
+        let ink = 0;
+        for (let i = 3; i < d.length; i += 4) if (d[i] > 8) ink++;
+        return { riding, still, ink };
+      });
+      check('the stack under the cursor appears when it should', ghost.riding, JSON.stringify(ghost));
+      check('and vanishes, pixels and all, when the model is empty', !ghost.still && ghost.ink === 0, JSON.stringify(ghost));
+
+      await page.keyboard.press('KeyE');
+      await page.waitForFunction(() => !document.querySelector('#panel-inventory.active'), null, { timeout: 4000 });
+      return 'audit clean; a magenta-painted slot was caught and repainted; cursor ghost cleared';
+    });
+
     // ------------------------------------------------------------ console hygiene
     const hard = [...pageErrors, ...consoleErrors.filter((t) => !/WebGL|GPU stall|Autoplay|favicon/i.test(t))];
     check('no uncaught browser errors during the tour', hard.length === 0, hard.slice(0, 4).join(' | '));

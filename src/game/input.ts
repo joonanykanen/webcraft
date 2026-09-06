@@ -1,5 +1,11 @@
 /** Input: keyboard + captured-mouse look (PH-1), wheel, gamepad (PH-7) and touch overrides (UI-4). */
-import { LOCK_SETTLE_MS, LOOK_PER_PIXEL, MAX_CLIENT_JUMP, MAX_LOOK_PER_EVENT } from '../core/constants.js';
+import {
+  LOCK_SETTLE_MS,
+  LOOK_PER_PIXEL,
+  MAX_CLIENT_JUMP,
+  MAX_LOOK_PER_EVENT,
+  MAX_LOOK_PER_FRAME,
+} from '../core/constants.js';
 
 export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
 
@@ -92,6 +98,13 @@ export class Input {
   /** How many mousemove events have actually reached the handler — divides into the look total to
    * give rad/px, which is the number that exposes double-counted input (see the F3 `look` line). */
   movesSeen = 0;
+  /** `mousemove` events that drove the camera from `movementX/Y` vs from `clientX/Y` deltas. The two
+   * are not the same animal: movement deltas are device counts, clientX deltas measure the pointer's
+   * travel — which can be warped by focus changes, other monitors, or an engine that never really
+   * captured the mouse. If `movesFromClient` is nonzero while you think you are locked, the look input
+   * is coming from the wrong place. F3 prints both. */
+  movesFromMovement = 0;
+  movesFromClient = 0;
   /** Accumulated mouse-derived look in radians (|dx| + |dy|), for rad/px above and the F3 line. */
   sessionLookFromMouse = 0;
   /** True while we hand the cursor back on purpose (a panel opened) — the app must not pause. */
@@ -250,15 +263,36 @@ export class Input {
     // movementX/Y is exact; clientX deltas are the fallback (and let tests drive the camera).
     // Some engines report `undefined`/NaN on the first event after a focus change — feeding that
     // into the yaw would make every coordinate NaN (= unplayable world), so sanitise first.
+    // ONE measurement source per capture state — this used to switch sources *between events*, and that
+    // is how "the mouse gets much more sensitive while the button is held" happens on engines where the
+    // two disagree. They are different quantities:
+    //   • `movementX/Y` — device counts. Under pointer lock the cursor cannot move, so this is the only
+    //     source there is (and with `unadjustedMovement` it is deliberately *not* screen pixels).
+    //   • `clientX/Y` deltas — the pointer's travel across the page, in CSS px, with the OS's own
+    //     pointer acceleration applied. The only source available when the mouse is merely hidden.
+    // Rule: movement deltas are the measurement, `clientX/Y` is a fallback for events that carry none
+    // (some engines leave movementX at 0 during a button-held drag, and Safari is unreliable about it).
+    // Picking by capture state instead — "locked means movement, free means client" — was tried and is
+    // wrong: it throws away the exact measurement in the cursor-hidden fallback, and it makes the look
+    // gain depend on what the engine happens to fill in. The per-event and per-frame caps below, plus the
+    // source counters, are what actually keep the reported sensitivity spikes from reaching the camera.
     const rawX = Number.isFinite(e.movementX) ? e.movementX : 0;
     const rawY = Number.isFinite(e.movementY) ? e.movementY : 0;
-    let dx = rawX;
-    let dy = rawY;
-    if (dx === 0 && dy === 0 && !this.usingLock && this.hasLast) {
+    // Some engines report `undefined`/NaN on the first event after a focus change — feeding that into
+    // the yaw would make every coordinate NaN (= unplayable world), so sanitise before using it.
+    let dx = 0;
+    let dy = 0;
+    let usedClient = false;
+    if (rawX !== 0 || rawY !== 0) {
+      dx = rawX;
+      dy = rawY;
+    } else if (this.hasLast) {
       dx = e.clientX - this.lastX;
       dy = e.clientY - this.lastY;
-      // A jump this big is the cursor teleporting (focus change, another screen), not a swing of
-      // the wrist. Believing it is what used to feel like "the sensitivity rises on its own".
+      usedClient = true;
+      // A jump this big is the cursor teleporting (focus change, another monitor, a drag handed over
+      // from outside the window), not a swing of the wrist. Believing it is what used to feel like
+      // "the sensitivity rises on its own".
       if (Math.abs(dx) > MAX_CLIENT_JUMP || Math.abs(dy) > MAX_CLIENT_JUMP) {
         dx = 0;
         dy = 0;
@@ -268,6 +302,8 @@ export class Input {
     this.lastY = e.clientY;
     this.hasLast = true;
     this.movesSeen++;
+    if (usedClient) this.movesFromClient++;
+    else this.movesFromMovement++;
     // Pointer lock re-centres the cursor on grant; that warp arrives as one enormous delta.
     if (this.usingLock && performance.now() - this.lockSettledAt < LOCK_SETTLE_MS) return;
     // One gigantic delta (refocussed tab, a drag resumed far away) must never spin the camera.
@@ -443,7 +479,21 @@ export class Input {
     return { ...this.lookBySource };
   }
 
+  /** Frames where the accumulated look hit `MAX_LOOK_PER_FRAME`. Nonzero means the input stream was
+   * wilder than a wrist can produce — see the `look` line on the F3 overlay. */
+  framesClamped = 0;
+
   consumeLook(): { dx: number; dy: number; sources: LookMix } {
+    // The single funnel every consumer reads from, so this is also the only place a frame-level ceiling
+    // can be enforced. Both axes are capped against the same budget: a diagonal sweep carries the
+    // larger magnitude and must not slip a rotation through that the frame could not show.
+    const magnitude = Math.hypot(this.lookDX, this.lookDY);
+    if (magnitude > MAX_LOOK_PER_FRAME) {
+      const scale = MAX_LOOK_PER_FRAME / magnitude;
+      this.lookDX *= scale;
+      this.lookDY *= scale;
+      this.framesClamped++;
+    }
     const out = { dx: this.lookDX, dy: this.lookDY, sources: this.lookBySource };
     this.lookDX = 0;
     this.lookDY = 0;

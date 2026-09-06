@@ -20,5 +20,7 @@
     "forceConsistentCasingInFileNames": true,
     "useDefineForClassFields": true
   },
-  "include": ["src", "tests", "vite.config.ts"]
+  // vite.config.ts is executed by Vite (esbuild), not by tsc — and it uses node:child_process to stamp
+  // the build, which would need @types/node. Type-checking the app and the tests is what matters here.
+  "include": ["src", "tests"]
 }

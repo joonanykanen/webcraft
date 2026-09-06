@@ -53,13 +53,81 @@ class SlotWidget {
     return this.acc.get();
   }
 
+  /**
+   * Render `id` into the slot's canvas. An empty slot is *cleared*, not merely hidden: hiding leaves the
+   * previous item's pixels in the canvas, and one stray `visibility: visible` from anywhere then shows an
+   * item that is not there. Returns false if the icon could not be drawn at all.
+   */
+  private paint(id: number): boolean {
+    const ctx = this.canvas.getContext('2d');
+    if (!ctx) return false;
+    const size = this.canvas.width;
+    ctx.clearRect(0, 0, size, size);
+    if (id === 0) return true;
+    try {
+      drawItemIcon(ctx, id, size);
+      return true;
+    } catch {
+      // Blank rather than stale: an unknown or half-migrated item id must never inherit the art of the
+      // item that occupied this slot earlier.
+      ctx.clearRect(0, 0, size, size);
+      return false;
+    }
+  }
+
+  /**
+   * Do the pixels in this slot's canvas actually depict `id`? Compares against a canonical render at the
+   * same size. Sampling every fourth pixel keeps a full-panel sweep cheap (41 slots) without missing a
+   * wrong icon, since the icons are 16×16 source art scaled up: a different item differs in whole blocks
+   * of samples.
+   */
+  paintedAs(id: number): boolean {
+    const size = this.canvas.width;
+    const have = this.canvas.getContext('2d');
+    if (!have) return true;
+    if (!this.scratch) {
+      this.scratch = document.createElement('canvas');
+      this.scratch.width = size;
+      this.scratch.height = size;
+    }
+    const want = this.scratch.getContext('2d');
+    if (!want) return true;
+    want.clearRect(0, 0, size, size);
+    if (id !== 0) {
+      try {
+        drawItemIcon(want, id, size);
+      } catch {
+        return true; // unknown item: nothing canonical to compare against
+      }
+    }
+    const a = want.getImageData(0, 0, size, size).data;
+    const b = have.getImageData(0, 0, size, size).data;
+    for (let i = 0; i < a.length; i += 16) {
+      if (a[i] !== b[i] || a[i + 1] !== b[i + 1] || a[i + 2] !== b[i + 2] || a[i + 3] !== b[i + 3]) return false;
+    }
+    return true;
+  }
+
+  /** Redraw now, ignoring the cache. Used by the panel's self-check on open. */
+  repaint(): void {
+    this.sig = '';
+    this.paint(this.acc.get()?.id ?? 0);
+    this.refresh(-1);
+  }
+
+  private scratch: HTMLCanvasElement | null = null;
+
   refresh(version: number): void {
     const s = this.acc.get();
     const id = s?.id ?? 0;
     const dur = s ? durabilityFrac(id, s.durabilityLeft) : null;
     const sig = `${id}:${s?.count ?? 0}:${dur === null ? '-' : dur.toFixed(2)}:${this.ui.hoverResult ? 'r' : ''}:${version}`;
     if (sig === this.sig) return;
-    this.sig = sig;
+    // Paint *first*, then remember what was painted. Committing the stamp before drawing used to mean
+    // "an icon that failed to draw is never drawn again": the slot kept showing whatever it held before,
+    // which is what looked like ghost copies of previously crafted items sitting on empty slots.
+    if (!this.paint(id)) this.sig = '';
+    else this.sig = sig;
     if (id === 0) {
       this.canvas.style.visibility = 'hidden';
       this.count.textContent = '';
@@ -67,8 +135,6 @@ class SlotWidget {
       return;
     }
     this.canvas.style.visibility = 'visible';
-    const ctx = this.canvas.getContext('2d');
-    if (ctx) drawItemIcon(ctx, id, this.canvas.width);
     this.count.textContent = (s?.count ?? 0) > 1 ? String(s?.count ?? 0) : '';
     if (dur !== null) {
       this.bar.style.display = 'block';
@@ -110,6 +176,7 @@ export class InventoryUI {
   private cursorEl = el<HTMLElement>('cursor-stack');
   private cursorCanvas = document.createElement('canvas');
   private cursorCount = document.createElement('span');
+  private cursorSig = '';
   private tip = el<HTMLElement>('tooltip');
   private widgets: SlotWidget[] = [];
   private resultWidget: SlotWidget | null = null;
@@ -388,6 +455,30 @@ export class InventoryUI {
     this.refresh();
   }
 
+  /**
+   * Ghost-icon guard (UI-2): compare every slot's *pixels* against the item the slot actually holds,
+   * repaint the ones that disagree, and describe what was wrong.
+   *
+   * This exists because the report was "the inventory shows items I crafted earlier, under the cursor".
+   * That is a painted-canvas problem, not a data problem — the tooltip and the counts were right, the art
+   * was stale — and a stale canvas can arise in more than one way (an interrupted draw, a canvas shared
+   * between two widgets, a cache stamp committed before the paint, an engine that did not clear). Rather
+   * than trust any single cause to be fixed, the panel verifies what it drew every time it opens.
+   */
+  auditPainting(): string {
+    const wrong: string[] = [];
+    for (const w of this.widgets) {
+      const s = w.acc.get();
+      const id = s?.id ?? 0;
+      if (w.paintedAs(id)) continue;
+      const name = id === 0 ? 'empty' : (item(id)?.name ?? `item ${id}`);
+      wrong.push(`${w.acc.label ?? 'slot'} shows art that is not ${name}`);
+      w.repaint();
+    }
+    if (wrong.length === 0) return 'all slots paint their own item';
+    return `${wrong.length} stale: ${wrong.slice(0, 8).join('; ')}${wrong.length > 8 ? ' …' : ''}`;
+  }
+
   refresh(): void {
     for (const w of this.widgets) w.refresh(this.version);
     this.refreshCursor();
@@ -397,12 +488,38 @@ export class InventoryUI {
     const c = this.b.inventory.cursor;
     if (!c) {
       this.cursorEl.classList.add('hidden');
+      // Wipe the pixels too. The element is hidden by a class, and any path that shows it again without
+      // painting (a missed change event, a stray class removal, an engine that re-renders the layer)
+      // would otherwise display the item that was last carried — "a ghost of something I crafted is
+      // following my cursor". An empty canvas cannot lie.
+      const gone = this.cursorCanvas.getContext('2d');
+      if (gone) gone.clearRect(0, 0, this.cursorCanvas.width, this.cursorCanvas.height);
+      this.cursorCount.textContent = '';
+      this.cursorSig = '';
       return;
     }
     this.cursorEl.classList.remove('hidden');
-    const ctx = this.cursorCanvas.getContext('2d');
-    if (ctx) drawItemIcon(ctx, c.id, this.cursorCanvas.width);
+    // Repaint only when the stack actually changed; this runs every tick as a self-healing sync.
+    const sig = `${c.id}:${c.count}:${c.durabilityLeft ?? '-'}`;
+    if (sig !== this.cursorSig) {
+      this.cursorSig = sig;
+      const ctx = this.cursorCanvas.getContext('2d');
+      if (ctx) drawItemIcon(ctx, c.id, this.cursorCanvas.width);
+    }
     this.cursorCount.textContent = c.count > 1 ? String(c.count) : '';
+  }
+
+  /**
+   * Re-sync the stack that follows the cursor from the *model*, not from a change event.
+   *
+   * The panel is rebuilt on `onInventoryChanged`, which is fine for slots (each one re-reads its own
+   * accessor) but the cursor stack is held by the inventory, not by any slot — several paths move it
+   * directly (splitting a stack with a right-click, taking a craft result, quick-moving, dying, closing
+   * the panel with the stack still in hand). Miss one notification and a painted icon stays glued to the
+   * pointer. Being driven from the frame loop makes that whole class of bug impossible.
+   */
+  syncCursor(): void {
+    this.refreshCursor();
   }
 
   showTip(acc: Accessor, w: SlotWidget): void {

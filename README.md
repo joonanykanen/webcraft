@@ -101,7 +101,10 @@ Boundaries that matter:
 * **Generation is pure.** `generateChunk(seed, cx, cz, blocks, biome, height)` has no state
   beyond its arguments; the worker pool is only a scheduling optimisation, and the same
   function runs inline in tests (`SyncGenPool`).
-* **`window.webcraft`** exposes the live `Game` for the console and the browser smoke test.
+* **`window.webcraft`** exposes the live `Game` for the console and the browser smoke test, plus
+  `build` (git sha + dirty flag + build time, also printed on the title screen and in the F3 overlay),
+  `TILE` (atlas indices) and `auditUI()`, which sweeps the open inventory and reports — and repairs —
+  any slot whose canvas paints something other than the item the slot holds.
 
 ### Deterministic world generation
 
@@ -173,7 +176,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 207 vitest tests (14 files, ~12 s, Node environment)
+npm run test         # 212 vitest tests (14 files, ~11 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -209,7 +212,7 @@ new generation in chunks nobody touched).
 ### Browser smoke test
 
 ```
-npm run smoke     # vite preview + real Chrome (59 checks, ~2½ min)
+npm run smoke     # vite preview + real Chrome (65 checks, ~3 min)
 npm run verify    # check + smoke
 ```
 
@@ -326,10 +329,18 @@ probing something a screenshot raised — and all are now covered:
   the fist is nearly as wide as a carried block and the grip overlaps the knuckles, so the skin stays
   in front of whatever is held. Held art is no longer skewed in 3D either: a 16 px sprite rotated in
   perspective staircases its own pixels (the pickaxe read as a broken zig-zag);
-* mob heads rendered upside-down (a pig's snout sat above its eyes): entity sprites are built as their
-  own `CanvasTexture`s (default `flipY = true`) while `voxelCubeGeometry` writes `v` downwards, so
-  entity faces need `flipV` — unit-tested. This is a separate pipeline from the chunk shader, which is
-  why re-mirroring the block tiles did not disturb mob faces;
+* mob heads rendered upside-down — **twice, the second time because of my own fix.** `voxelCubeGeometry`
+  gives a face's top vertex `v = 1`, which on a `flipY = false` atlas samples the bottom of the tile, so
+  mob faces originally needed a vertical flip in the geometry. Then RD-3 (below) added the mirror to the
+  chunk *shader* instead — and mob cubes are drawn with that same material (`Renderer.entityCube()` reuses
+  `opaqueMat`), so the geometry flip became a second mirror: muzzle on the forehead, eyes at the chin.
+  `flipV` is gone; one mirror, in the shader, for everything that samples the atlas.
+  The process lesson is in `scripts/probe-mobface.mjs`: an earlier version of that script "verified" the
+  faces were upright by colour-classifying a 130 px crop, and the classification matched horn and sky
+  pixels instead of eyes and muzzle. Orientation is now asserted where it can be asserted honestly — the
+  mesher/shader pairing in `tests/uv-orientation.test.ts`, rendered block pixels in smoke RD-3 — and a
+  screenshot of a whole head is what settles the mob question. Claims of "verified fixed" that are not
+  backed by one of those two things are not verification;
 * Escape needed double presses and the mouse felt "spiky" when a refocus delivered one huge delta —
   Pointer Lock is the primary path again (see [Mouse capture](#mouse-capture)), the cursor is
   re-centred under it so a second monitor cannot spoil the deltas, a single `mousemove` may never turn
@@ -339,6 +350,21 @@ probing something a screenshot raised — and all are now covered:
   fades after `MILESTONE_FOCUS_MS` and comes back only when it is worth reading: the goal changed, a
   milestone unlocked, a panel closed (and picking up the 4th log of 12 is *not* a goal change), or the
   player presses `Tab` to pin it. One rule, driven from `onScreen()`, so no path can leave it stuck on;
+* **ghost items in the inventory and under the cursor**: painted canvases that no longer matched the model.
+  Slots committed their cache signature *before* drawing, so an icon that failed to draw was never drawn
+  again and the slot kept showing whatever it held before; empty slots were hidden rather than cleared, so
+  one stray `visibility: visible` re-exposed the old art. And the stack that rides the cursor was refreshed
+  only on `onInventoryChanged`, while several paths move `inventory.cursor` directly (right-click split,
+  taking a craft result, quick-move, dying, closing the panel with it in hand) — miss the notification and a
+  crafted icon is glued to the pointer. Now: paint-then-commit, clear-when-empty, the cursor stack is
+  re-synced from the model on every HUD tick, and the panel audits its own pixels when it opens
+  (`webcraft.auditUI()`, asserted in smoke UI-7 by painting a slot solid magenta and requiring detection);
+* **a stale build being debugged as a bug.** The title screen, the F3 overlay and `webcraft.build` now
+  report the git sha, a dirty flag and the build time. That is not decoration: "still broken" reports have
+  been traced to a `dist/` served from another port, and there was previously no way to tell in-game;
+* passive mob heads were sunk *inside* their bodies (a cow's head occupied 0.89…1.35 while its body's top
+  was 1.24, so the face was mostly buried), which is why screenshots read as a coloured block instead of
+  an animal. Heads now sit on the body with a little overlap, like a neck;
 * a non-finite `movementX` (the first event after a focus change) went straight into `Player.look`,
   making yaw/pitch NaN and therefore *every* coordinate NaN — an empty world. Input sanitises deltas
   and the player rejects non-finite look input.
@@ -359,14 +385,32 @@ under a mouse. `scripts/probe-lookgain.mjs` is the same question turned into a m
 synthetic events with known pixel deltas and requires every cell — pointer lock or free cursor, touch
 controls on or off, button held or not — to agree on radians-per-pixel within 15 %.
 
+Synthetic events are *untrusted*, so they cannot exercise pointer lock. `probe-lookdrag.mjs` covers what
+they cannot: real `mouse.down / mouse.move / mouse.up` through CDP and WebKit, comparing look gain while
+the button is held against the same gesture free. The `look` line also splits by branch — how many events
+were measured from `movementX/Y` versus `clientX/Y`, and how many frames had to be clamped. Look is capped
+twice on purpose: `MAX_LOOK_PER_EVENT` rejects one absurd delta (a refocus warp), and `MAX_LOOK_PER_FRAME`
+rejects a *pile* of ordinary ones, which is the other shape "sensitivity jumps while I hold the button" can
+take — a hitch, a backgrounded tab, an engine that queues input while a button is down. Both discards are
+counted, so a clamp hiding a real bug is itself visible.
+
+One experiment in this area was wrong and is recorded as such: selecting the measurement source by capture
+state ("locked means `movement`, free means `client`") was tried, and three existing tests failed
+immediately — it throws away the exact measurement in the cursor-hidden fallback and makes the gain depend
+on what an engine happens to fill in. `movementX/Y` is the measurement; `clientX/Y` is only a fallback for
+events that carry none.
+
 For anything the assertions cannot express — does the arm *look* right, is that pig's face upright,
 are the hearts really flush with the hotbar — there are small one-purpose probes that boot
 `vite preview`, drive the real page and write cropped PNGs into `smoke/` for a human to read:
 `probe-visual2.mjs` (capture, HUD, punch, look, Esc, milestone panel, mining), `probe-hand.mjs`
-(held empty hand / block / tool / food), `probe-faces.mjs` (mob faces held still), `probe-pips.mjs`
+(held empty hand / block / tool / food), `probe-mobface.mjs` (large crops of each mob's face, for the eye
+check that statistics cannot replace), `probe-pips.mjs`
 (HUD geometry at two viewport sizes, including whether the two rows really share a baseline),
 `probe-orient.mjs` (a shelf of grass/log/torch/bench/furnace photographed close-up, to see whether
-asymmetric tiles land the right way up on block faces), `probe-goals.mjs` (the next-goal card's
+asymmetric tiles land the right way up on block faces), `probe-slots.mjs` (every inventory slot's box and its icon's
+bounding box, at several viewport sizes and in both engines — the shape a "ghost item outside its slot"
+report would leave behind), `probe-goals.mjs` (the next-goal card's
 fade/return/pin cycle), `probe-polish.mjs` (full-screen HUD, punch, unlock toast, pause) and
 `probe-lookgain.mjs`, which dispatches synthetic pointer+mouse events with *known* pixel deltas and
 prints radians-per-pixel for every combination of pointer lock, free cursor, touch controls and

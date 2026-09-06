@@ -314,6 +314,9 @@ export class Hud {
       ['state', `${m.mode} · ${m.quality} · webgl${m.webgl2 ? '2' : '1'}${m.flying ? ' · fly' : ''}${m.sneaking ? ' · sneak' : ''}${m.onGround ? '' : ' · air'}`],
       ['mined', `${m.stats.blocksMined} · placed ${m.stats.blocksPlaced} · deaths ${m.deaths}`],
       ['seed', String(m.seed)],
+      // Which build is this? Without it, "still broken" is unanswerable: the same bug fixed in HEAD has
+      // been reported against a stale dist/ served from another port more than once.
+      ['build', __BUILD_ID__],
     ];
     return lines
       .map(([k, v, cls]) => `<div><span class="dim">${k}</span> ${escapeHtml(v)}${cls ? `<span class="${cls.trim()}"></span>` : ''}</div>`)

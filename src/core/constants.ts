@@ -33,6 +33,18 @@ export const LOCK_SETTLE_MS = 150;
 /** A coordinate jump larger than this between two events is the cursor teleporting (focus change,
  * another monitor), not the player moving the mouse. */
 export const MAX_CLIENT_JUMP = 260;
+/**
+ * One frame may never turn the camera more than this (radians, ~29 degrees — 1 700 deg/s at 60 FPS).
+ * `MAX_LOOK_PER_EVENT` guards a single event; this guards the *sum* of everything that arrived between
+ * two frames, which is the number that decides what the player actually sees. It exists because the
+ * look input can arrive from more than one measurement source and from coalesced bursts: when a browser
+ * delivers three events of 300 px instead of sixty of 15 px (which is what happens while a button is
+ * held and the frame loop is busy mining), each event passes the per-event cap and the frame still
+ * rotates by a kilometre. A ceiling per frame turns that into "the flick saturated" instead of "the
+ * camera is spinning", and the surplus is dropped rather than accumulated, so it can never come back as
+ * a delayed lurch.
+ */
+export const MAX_LOOK_PER_FRAME = 0.5;
 
 // ---- physics (PH-2, PH-3) ----
 export const PLAYER_WIDTH = 0.6;

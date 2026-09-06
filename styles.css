@@ -540,6 +540,13 @@ ul.keys {
   border: 1px solid rgba(255, 255, 255, 0.14);
   border-radius: 8px;
 }
+.build {
+  margin: -0.4rem 0 0;
+  font: 500 0.68rem/1.4 ui-monospace, Menlo, monospace;
+  color: var(--muted, #8a97ab);
+  opacity: 0.75;
+}
+
 .slot {
   position: relative;
   width: 50px;

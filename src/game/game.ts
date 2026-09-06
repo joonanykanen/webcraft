@@ -511,6 +511,7 @@ export class Game implements EntityHost {
     // would show up as the mouse total jumping relative to how much the cursor actually moved.
     const totals =
       `mouse ${this.input.movesSeen} moves · ${s.mouse.toFixed(1)} rad (${this.input.radPerMove().toFixed(2)}/move)` +
+      ` · ${this.input.movesFromMovement} movement / ${this.input.movesFromClient} clientXY` +
       ` · drag ${s.touchDrag.toFixed(1)} rad`;
     if (t < 1e-6) return `idle · ${totals}`;
     const parts = [`mouse ${m.mouse.toFixed(3)}`];

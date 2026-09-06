@@ -9,12 +9,16 @@
  * test; the geometry half — which also covers hand-built cross quads for torches and plants — is here.
  */
 import { describe, expect, it } from 'vitest';
+// Vite's ?raw imports (typed by vite/client) give the same text without needing @types/node.
+import mobsSource from '../src/game/mobs.ts?raw';
+import rendererSource from '../src/render/renderer.ts?raw';
 import { CHUNK_SX, CHUNK_SZ, CHUNK_SY, blockIndex } from '../src/core/constants.js';
 import { BlockId } from '../src/world/blocks.js';
 import { Chunk } from '../src/world/chunk.js';
 import { buildChunkMesh } from '../src/world/mesher.js';
 import { relightChunk } from '../src/world/lighting.js';
 import { CHUNK_VERT } from '../src/render/shaders.js';
+import { voxelCubeGeometry } from '../src/render/geometry.js';
 import type { MeshData } from '../src/core/types.js';
 
 function chunkWith(paint: (x: number, y: number, z: number) => number): Chunk {
@@ -90,5 +94,47 @@ describe('vertical UV convention', () => {
     // would resolve every tile to its mirrored row, so assert the mirror stays inside the tile maths.
     expect(CHUNK_VERT).toContain('(1.0 - aUV.y)');
     expect(CHUNK_VERT).toMatch(/tilePos = vec2\(mod\(aTile, 8\.0\), floor\(aTile \/ 8\.0\)\)/);
+  });
+});
+
+/**
+ * The second half of the same convention: entity cubes.
+ *
+ * Mob bodies are built from `voxelCubeGeometry` but drawn with the *chunk* material — `Renderer.entityCube()`
+ * reuses `opaqueMat` — so the shader's in-tile mirror applies to them as well. `MobManager` used to
+ * compensate vertically in the geometry (`flipV: true`, added when the shader did not mirror); with the
+ * shader mirroring too that became a double mirror, and every mob's face rendered upside-down — muzzle on
+ * the forehead, eyes at the chin. The two halves are one fact and have to be tested as one fact: asserting
+ * only about the chunk shader (above) passed happily while cows were inverted.
+ */
+describe('entity cubes share the chunk material (MO-4)', () => {
+  it('mob cubes really are drawn with the material that mirrors tiles', () => {
+    const renderer = rendererSource;
+    expect(renderer).toMatch(/entityCube\([\s\S]{0,160}voxelCubeGeometry\(opts\),\s*this\.opaqueMat\)/);
+    expect(CHUNK_VERT).toContain('(1.0 - aUV.y)'); // the mirror this all hinges on
+  });
+
+  it('so mob geometry must not mirror a second time', () => {
+    expect(mobsSource).not.toMatch(/flipV\s*:/);
+  });
+
+  it('and voxelCubeGeometry leaves the top vertex at v = 1 by default', () => {
+    const g = voxelCubeGeometry({ size: 1, top: 3, bottom: 3, side: 3, front: 47 });
+    const pos = g.getAttribute('position');
+    const uv = g.getAttribute('aUV');
+    // FACES order is +y, -y, +x, -x, +z, -z with four vertices each. Only upright faces have a top and a
+    // bottom to compare, so check +x (verts 8..11) and the nose face -z (verts 20..23) — the one that
+    // carries mob face art. The +y/-y faces are horizontal and are not interesting here.
+    for (const first of [8, 20]) {
+      let topV = 0;
+      let bottomV = 1;
+      for (let i = first; i < first + 4; i++) {
+        if (pos.getY(i) > 0.1) topV = Math.max(topV, uv.getY(i));
+        else bottomV = Math.min(bottomV, uv.getY(i));
+      }
+      expect(topV).toBeGreaterThan(0.9);
+      expect(bottomV).toBeLessThan(0.1);
+    }
+    g.dispose();
   });
 });

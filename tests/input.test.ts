@@ -1,13 +1,15 @@
 /**
  * Mouse capture, look scaling and the movement snapshot (PH-1, PH-2, PH-6).
  *
- * The world takes the mouse by hiding the cursor and reading raw deltas — deliberately *not* the
- * Pointer Lock API: that is what painted Chrome's "Your mouse pointer is hidden" banner, and the
- * first Escape went to the browser instead of pausing the game. Runs in the node environment, so
- * events are fed through Input's public seams instead of a DOM.
+ * The world takes the mouse with Pointer Lock, and falls back to cursor-hidden raw deltas when the
+ * browser refuses or never answers: the mouse must never be dead. Lock is preferred because it is the
+ * only thing that survives multi-monitor setups and cursor travel; the banner Chrome paints for it
+ * cannot be suppressed and is documented in README. While locked, deltas come from movementX/Y; while
+ * free, from clientX/Y — one measurement source per capture state, never both. Runs in the node
+ * environment, so events are fed through Input's public seams instead of a DOM.
  */
 import { describe, expect, it } from 'vitest';
-import { LOOK_PER_PIXEL, MAX_LOOK_PER_EVENT } from '../src/core/constants.js';
+import { LOOK_PER_PIXEL, MAX_LOOK_PER_EVENT, MAX_LOOK_PER_FRAME } from '../src/core/constants.js';
 import { Input, clampStep } from '../src/game/input.js';
 
 const key = (code: string, opts: { repeat?: boolean; caps?: boolean } = {}) =>
@@ -187,6 +189,46 @@ describe('mouse look (PH-6, sensitivity spikes)', () => {
     } as unknown as MouseEvent);
     expect(Number.isFinite(input.lookDX)).toBe(true);
     expect(Number.isFinite(input.lookDY)).toBe(true);
+  });
+
+  it('caps a whole frame, so a backlog of events cannot turn into a spin', () => {
+    // Per-event clamping (above) rejects one absurd event. This rejects the other shape of the report
+    // "sensitivity jumps while holding the mouse button": many ordinary events arriving between two
+    // frames — a hitch, a background tab, a browser that queues input while the button is held — whose
+    // sum would be several full turns of the head in a single frame.
+    const input = new Input();
+    input.setActive(true);
+    input.capture();
+    for (let i = 0; i < 40; i++) input.addLook(0.05, 0);
+    const drained = input.consumeLook();
+    expect(Math.abs(drained.dx)).toBeLessThanOrEqual(MAX_LOOK_PER_FRAME + 1e-9);
+    expect(input.framesClamped).toBe(1);
+    // The excess is dropped, not deferred: a look the player did not ask for must not arrive next frame.
+    expect(input.consumeLook().dx).toBe(0);
+    // Ordinary look — anything under the cap — must pass through untouched.
+    input.addLook(0.02, -0.01);
+    const normal = input.consumeLook();
+    expect({ dx: normal.dx, dy: normal.dy }).toEqual({ dx: 0.02, dy: -0.01 });
+    expect(input.framesClamped).toBe(1);
+  });
+
+  it('accounts for look by source, which is how the double-count was caught', () => {
+    // The F3 overlay prints these numbers; the regression this guards is a second look source adding
+    // itself to the same gesture (a viewport drag-look that also ran for mouse pointers).
+    const input = new Input();
+    input.setActive(true);
+    input.capture();
+    for (let i = 0; i < 10; i++) input.handleMouseMove(pointer({ movementX: 10, movementY: 0 }));
+    expect(input.movesSeen).toBe(10);
+    expect(input.movesFromMovement).toBe(10);
+    expect(input.movesFromClient).toBe(0); // locked: one source, not movementX *and* clientX
+    expect(input.radPerMove()).toBeCloseTo(10 * LOOK_PER_PIXEL * input.sensitivity, 6);
+    const drained = input.consumeLook();
+    expect(drained.sources.ui).toBe(0);
+    expect(drained.sources.mouse).toBeCloseTo(10 * 10 * LOOK_PER_PIXEL * input.sensitivity, 5);
+    // Nothing arrived through the UI path: a stray viewport drag-look would show up here as `ui` look
+    // added on top of the same gesture, which is what made the mouse feel 30% faster while LMB was held.
+    expect(drained.sources.ui).toBe(0);
   });
 });
 

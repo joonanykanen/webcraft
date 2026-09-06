@@ -81,7 +81,7 @@ function model(kind: MobKind): CubeSpec[] {
     case 'pig':
       return [
         { size: 0.7, x: 0, y: 0.55, z: 0, head: false },
-        { size: 0.42, x: 0, y: 0.7, z: -0.44, head: true },
+        { size: 0.42, x: 0, y: 1.05, z: -0.44, head: true }, // on the body (0.7 @ 0.55 → top 0.90), not inside it
         { size: 0.18, x: -0.22, y: 0.16, z: -0.2, head: false },
         { size: 0.18, x: 0.22, y: 0.16, z: -0.2, head: false },
         { size: 0.18, x: -0.22, y: 0.16, z: 0.22, head: false },
@@ -90,7 +90,7 @@ function model(kind: MobKind): CubeSpec[] {
     case 'cow':
       return [
         { size: 0.78, x: 0, y: 0.85, z: 0, head: false },
-        { size: 0.46, x: 0, y: 1.12, z: -0.5, head: true },
+        { size: 0.46, x: 0, y: 1.38, z: -0.5, head: true }, // on the body (0.78 @ 0.85 → top 1.24), not inside it
         { size: 0.2, x: -0.26, y: 0.22, z: -0.26, head: false },
         { size: 0.2, x: 0.26, y: 0.22, z: -0.26, head: false },
         { size: 0.2, x: -0.26, y: 0.22, z: 0.26, head: false },
@@ -99,7 +99,7 @@ function model(kind: MobKind): CubeSpec[] {
     case 'sheep':
       return [
         { size: 0.76, x: 0, y: 0.8, z: 0, head: false },
-        { size: 0.4, x: 0, y: 1.08, z: -0.44, head: true },
+        { size: 0.4, x: 0, y: 1.3, z: -0.44, head: true }, // on the body (0.76 @ 0.8 → top 1.18), not inside it
         { size: 0.18, x: -0.22, y: 0.2, z: -0.2, head: false },
         { size: 0.18, x: 0.22, y: 0.2, z: -0.2, head: false },
         { size: 0.18, x: -0.22, y: 0.2, z: 0.22, head: false },
@@ -181,9 +181,15 @@ export class Mob {
         side: tile,
         front: c.head ? face : undefined,
         tints: c.head ? headTints : undefined,
-        // Face art (eyes above the snout) is painted upright; the chunk face basis runs `v`
-        // downwards, so without this every mob's face renders upside-down.
-        flipV: c.head === true,
+        // NOTE: no vertical flip here, on purpose. Mob cubes are drawn with the *chunk* material
+        // (`Renderer.entityCube()` reuses `opaqueMat`), whose vertex shader already mirrors the tile
+        // vertically (`fv = 1.0 - aUV.y`, RD-3) so that atlas art — painted top-down on a canvas and
+        // uploaded with `flipY = false` — lands the right way up. `voxelCubeGeometry` gives the top
+        // vertex of a face v = 1, which that shader resolves to the top of the tile. Compensating in the
+        // geometry as well mirrors twice, and every mob's face renders upside-down: eyes at the chin,
+        // muzzle on the forehead. Decided from the framebuffer by scripts/probe-faces.mjs, which
+        // correlates the rendered head box with the face tile's own luminance profile (negative =
+        // mirrored) — a shading-invariant test, since entity faces carry light and tint.
         sky,
         block: blockLight,
         centered: true,
