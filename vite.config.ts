@@ -42,5 +42,14 @@ export default defineConfig({
   test: {
     environment: 'node',
     include: ['tests/**/*.test.ts'],
+    /**
+     * Every world-generating test pays for real terrain, and the default 5 s is a statement about the
+     * machine running it: the first explosion case takes ~1.4 s on a laptop, ~2.3 s when pinned to two
+     * threads, and timed out past 5 s on CI's two shared cores. A suite that fails there and passes
+     * here teaches people to ignore it, so the ceiling is 30 s — a hung test now costs half a minute
+     * instead of a red build nobody trusts.
+     */
+    testTimeout: 30_000,
+    hooksTimeout: 30_000,
   },
 });
