@@ -540,3 +540,27 @@ unavailable the app says exactly which capability was missing instead of showing
   to not use pointer lock on that engine at all) and the `look` line — a rising `rad/move` proves the events
   themselves carry more counts. Settings → *Lock mouse while playing* off bypasses the grab entirely and is
   worth trying, though nobody has tested it against this report.
+
+---
+
+## How this was made
+
+WebCraft was implemented end to end — world generation, meshing, lighting, physics, gameplay, UI,
+procedural textures and audio, saves, tests and the browser smoke harness — by
+[Intel/Qwen3.8-Flash-Next-W4A16-AutoRound](https://huggingface.co/Intel/Qwen3.8-Flash-Next-W4A16-AutoRound)
+running in the [pi](https://pi.dev) coding-agent harness. Design direction, bug reports, playtest
+verdicts and the "no, that is still wrong" callouts came from a human playing the game.
+
+| | |
+| --- | --- |
+| Tokens used | ↑ 188 M prompt · ↓ 1.7 M completion |
+| Average throughput | ~60 tok/s decode |
+| What it produced | 11 commits, ~15.8 k lines of TypeScript, 217 unit tests, 35 real-browser smoke steps (66 checks) |
+
+188 M input tokens is a lot for a project this size, and most of it went on verifying rather than
+writing: build, run the game in a real browser, read the screenshots, run the suite again — plus two
+long stretches spent on a mouse-look bug that turned out to live in another browser's pointer-lock
+implementation and is still open (see *Known limits*). It is also worth recording that the failure
+mode of an agent that edits by exact text splice is deleting code it did not mention: four smoke
+steps and a helper function disappeared this way, which is why the suite now fails when fewer checks
+run than it expects. Decode alone accounts for roughly 8 wall-clock hours at 60 tok/s.
