@@ -10,6 +10,11 @@
  * renderer to draw → save → reload → the world must still be there.
  *
  *   npm run build && node scripts/pages-check.mjs
+ *   node scripts/pages-check.mjs https://joonanykanen.github.io/webcraft/ 16ed1d5
+ *
+ * With a URL it checks that deployment instead of a local copy — same checks, real network, and an
+ * optional commit SHA to confirm the artifact being served was built from the commit you think it
+ * was (the game prints its own build id, which is exactly why that stamp exists).
  */
 import { spawn } from 'node:child_process';
 import { chromium } from 'playwright-core';
@@ -20,22 +25,28 @@ import { join } from 'node:path';
 const PORT = 4431;
 const SUBPATH = 'webcraft'; // Pages serves a project site under /<repo>/
 const ROOT = new URL('..', import.meta.url).pathname;
-const BASE = `http://localhost:${PORT}/${SUBPATH}/`;
+const REMOTE = process.argv[2] ?? null;
+const EXPECT_SHA = process.argv[3] ?? null;
+let BASE = REMOTE ? REMOTE.replace(/\/$/, '') + '/' : `http://localhost:${PORT}/${SUBPATH}/`;
+let server = null;
+let site = null;
 
-if (!existsSync(join(ROOT, 'dist', 'index.html'))) {
+if (REMOTE) {
+  console.log(`checking the deployment at ${BASE}`);
+} else if (!existsSync(join(ROOT, 'dist', 'index.html'))) {
   console.error('dist/index.html is missing — run `npm run build` first.');
   process.exit(1);
-}
-
-// A nested directory, not the dist folder itself: the URL has to have path segments in it.
-const site = mkdtempSync(join(tmpdir(), 'pages-sim-'));
-cpSync(join(ROOT, 'dist'), join(site, SUBPATH), { recursive: true });
-const server = spawn('python3', ['-m', 'http.server', String(PORT), '--bind', '127.0.0.1'], {
-  cwd: site, stdio: ['ignore', 'ignore', 'ignore'],
-});
-for (let i = 0; i < 60; i++) {
-  try { if ((await fetch(BASE)).ok) break; } catch { /* not up yet */ }
-  await new Promise((r) => setTimeout(r, 250));
+} else {
+  // A nested directory, not the dist folder itself: the URL has to have path segments in it.
+  site = mkdtempSync(join(tmpdir(), 'pages-sim-'));
+  cpSync(join(ROOT, 'dist'), join(site, SUBPATH), { recursive: true });
+  server = spawn('python3', ['-m', 'http.server', String(PORT), '--bind', '127.0.0.1'], {
+    cwd: site, stdio: ['ignore', 'ignore', 'ignore'],
+  });
+  for (let i = 0; i < 60; i++) {
+    try { if ((await fetch(BASE)).ok) break; } catch { /* not up yet */ }
+    await new Promise((r) => setTimeout(r, 250));
+  }
 }
 
 const browser = await chromium.launch({
@@ -58,7 +69,7 @@ const check = (name, pass, info = '') => {
   console.log(`  ${pass ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m'} ${name}${info ? ' — ' + info : ''}`);
 };
 
-console.log(`serving ${BASE}\n`);
+console.log(`playing ${BASE}\n`);
 await page.goto(BASE, { waitUntil: 'networkidle' });
 
 const assetUrls = await page.evaluate(() => ({
@@ -72,6 +83,12 @@ check('entry script + CSS resolved under the subpath',
 await page.waitForFunction(() => !!window.webcraft, null, { timeout: 30000 });
 const menuActive = await page.evaluate(() => document.querySelector('#screen-main')?.classList.contains('active') ?? false);
 check('main menu booted', menuActive);
+if (EXPECT_SHA) {
+  // The game prints which build it is for exactly this reason: "still broken" is answered by the
+  // stamp before anything else is.
+  const stamp = await page.evaluate(() => window.webcraft.build ?? '');
+  check('the artifact being served was built from that commit', stamp.startsWith(EXPECT_SHA), stamp);
+}
 if (!menuActive) {
   // The capability probe has its own screen; if it fired, that is the whole answer.
   const unsupported = await page.evaluate(() => [...document.querySelectorAll('#support-list li')].map((n) => n.textContent));
@@ -120,8 +137,8 @@ check('nothing 404ed', missing.length === 0, missing.slice(0, 3).join(', '));
 check('no uncaught page errors', errors.length === 0, errors.slice(0, 2).join(' | '));
 
 await browser.close();
-server.kill('SIGTERM');
-rmSync(site, { recursive: true, force: true });
+if (server) server.kill('SIGTERM');
+if (site) rmSync(site, { recursive: true, force: true });
 
 const failed = results.filter(([, ok]) => !ok);
 console.log(`\n${results.length - failed.length}/${results.length} checks passed`);

@@ -574,6 +574,16 @@ it as `http://localhost:4431/webcraft/` the way Pages serves a project site, and
 entry script and stylesheet resolved under the subpath, worker streaming 177 chunks, renderer
 drawing, and the world surviving a reload on the Pages origin. Seven checks.
 
+Give it a URL and it plays that deployment over the real network instead, with the commit SHA as a
+second argument:
+
+```
+node scripts/pages-check.mjs https://joonanykanen.github.io/webcraft/ $(git rev-parse --short origin/main)
+```
+
+The SHA is checked against the build stamp the game prints on its own menu — "it is deployed" and
+"*this build* is deployed" are different claims, and only one of them can be verified from outside.
+
 Deployment is [`.github/workflows/deploy-pages.yml`](.github/workflows/deploy-pages.yml): on every
 push to `main` it type-checks, runs the unit suite, builds and publishes `dist/` as a Pages artifact.
 Nothing build-generated is committed, and nothing is deployed by hand.
