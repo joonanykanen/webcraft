@@ -1,4 +1,5 @@
 /** Input: keyboard + Pointer-Lock mouse (PH-1), wheel, gamepad (PH-7) and touch overrides (UI-4). */
+import { LOCK_SETTLE_MS, LOOK_PER_PIXEL } from '../core/constants.js';
 
 export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
 
@@ -54,8 +55,7 @@ export class Input {
   /** Timestamp of the last Space press; a tap can begin and end between two sim steps. */
   jumpPressedAt = -1e12;
   sensitivity = 1;
-  invertY = false;
-  /** touch overrides (UI-4) */
+  invertY = false;  /** touch overrides (UI-4) */
   touch = {
     enabled: false,
     x: 0,
@@ -75,13 +75,29 @@ export class Input {
   private lastShiftTap = -1;
   private lastWTap = -1;
   private sprintHold = false;
+  /** Caps Lock doubles as sprint: macOS swallows Ctrl+Space, so Ctrl+W + jump is a dead end. */
+  private capsSprint = false;
+  /** Ignore look deltas for a moment after the lock engages (the cursor gets re-centred). */
+  private settleUntil = -1e12;
+  /** Last user gesture (click/keypress); pointer lock may only be taken from one. */
+  private gestureAt = -1e12;
+  /**
+   * True while a floating card (the tutorial overlay) owns the cursor. Lock requests are refused —
+   * and remembered — until it hands the cursor back: a grant that was still in flight when the card
+   * appeared used to capture the pointer behind the player's back (= unclickable "Next" button).
+   */
+  uiCapture = false;
+  private releaseOnGrantUntil = 0;
+  /** `requestPointerLock()` was called and its `pointerlockchange` has not arrived yet. */
+  private pendingRequest = false;
+  /** We would like the pointer but had no gesture for it; the next click will take it. */
+  wantLock = false;
   private gamepadButtons: boolean[] = [];
   private gamepadAxes = [0, 0, 0, 0];
   private gamepadConnected = false;
 
   attach(canvas: HTMLCanvasElement): void {
-    this.canvas = canvas;
-    window.addEventListener('keydown', this.keyDown);
+    this.canvas = canvas;    window.addEventListener('keydown', this.keyDown);
     window.addEventListener('keyup', this.keyUp);
     window.addEventListener('blur', this.blur);
     canvas.addEventListener('mousedown', this.mouseDown);
@@ -92,6 +108,11 @@ export class Input {
     document.addEventListener('pointerlockchange', this.lockChange);
     window.addEventListener('gamepadconnected', this.gamepadChange);
     window.addEventListener('gamepaddisconnected', this.gamepadChange);
+  }
+
+  /** Only the canvas is needed to take the pointer; listeners stay with attach() (tests, embeds). */
+  setCanvas(canvas: HTMLCanvasElement): void {
+    this.canvas = canvas;
   }
 
   detach(): void {
@@ -111,6 +132,8 @@ export class Input {
   private contextMenu = (e: Event) => e.preventDefault();
 
   private keyDown = (e: KeyboardEvent) => {
+    this.gestureAt = performance.now();
+    this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
     if (e.repeat) {
       if (GAME_KEYS.has(e.code) && this.active) e.preventDefault();
       return;
@@ -132,6 +155,7 @@ export class Input {
   };
 
   private keyUp = (e: KeyboardEvent) => {
+    this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
     this.down.delete(e.code);
     // releasing the forward key ends a double-tap sprint
     if (e.code === 'KeyW' && !this.isDown('KeyW')) this.sprintHold = false;
@@ -145,14 +169,14 @@ export class Input {
   };
 
   private mouseDown = (e: MouseEvent) => {
+    this.gestureAt = performance.now();
     if (!this.active) return;
-    if (!this.locked) {
-      this.requestLock();
-      return;
-    }
+    // Start the action even when the pointer is still free: a click that captures the mouse
+    // should also swing the player's arm, otherwise the first hit "does nothing".
     if (e.button === 0) this.mining = true;
     if (e.button === 2) this.placing = true;
     if (e.button === 1) this.onKeyDown?.('MouseMiddle', e as unknown as KeyboardEvent);
+    if (!this.locked) this.requestLock();
   };
 
   private mouseUp = (e: MouseEvent) => {
@@ -161,9 +185,13 @@ export class Input {
   };
 
   private mouseMove = (e: MouseEvent) => {
+    this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
     if (!this.locked || !this.active) return;
-    this.lookDX += e.movementX * 0.0022 * this.sensitivity;
-    this.lookDY += e.movementY * 0.0022 * this.sensitivity * (this.invertY ? -1 : 1);
+    // Entering pointer lock recentres the cursor; the browser reports that jump as one huge
+    // movement delta, which felt like the mouse going crazy while the button was held.
+    if (performance.now() < this.settleUntil) return;
+    this.lookDX += e.movementX * LOOK_PER_PIXEL * this.sensitivity;
+    this.lookDY += e.movementY * LOOK_PER_PIXEL * this.sensitivity * (this.invertY ? -1 : 1);
   };
 
   private wheelHandler = (e: WheelEvent) => {
@@ -173,8 +201,21 @@ export class Input {
   };
 
   private lockChange = () => {
+    this.pendingRequest = false;
     this.locked = document.pointerLockElement === this.canvas;
-    if (!this.locked) {
+    if (this.locked && performance.now() < this.releaseOnGrantUntil) {
+      // a grant we no longer want (a card asked for the cursor while it was in flight) — hand it back
+      this.releaseOnGrantUntil = 0;
+      this.expectUnlock = true;
+      document.exitPointerLock();
+      return;
+    }
+    if (this.locked) {
+      // drop the recentring spike and everything banked while the pointer was free
+      this.lookDX = 0;
+      this.lookDY = 0;
+      this.settleUntil = performance.now() + LOCK_SETTLE_MS;
+    } else {
       this.mining = false;
       this.placing = false;
       this.down.clear();
@@ -192,16 +233,49 @@ export class Input {
     this.gamepadConnected = navigator.getGamepads?.().some((p) => !!p) ?? false;
   };
 
+  /**
+   * Take the pointer. Chrome paints its "Your mouse pointer is hidden…" banner whenever a page
+   * grabs the pointer *without* user activation (after an `await`, from a timer, …), so a
+   * request outside a click/keypress is remembered instead of fired — the next real click takes it.
+   */
   requestLock(): void {
     if (!this.canvas || this.locked) return;
+    if (this.uiCapture || !this.hasGesture()) {
+      this.wantLock = true;
+      return;
+    }
+    this.wantLock = false;
+    this.pendingRequest = true;
     const p = this.canvas.requestPointerLock?.() as unknown as Promise<void> | undefined;
     if (p && typeof p.catch === 'function') p.catch(() => undefined);
   }
 
+  /** True while the browser considers us inside a user gesture (click / key press). */
+  hasGesture(): boolean {
+    const ua = (navigator as { userActivation?: { isActive?: boolean } }).userActivation;
+    if (typeof ua?.isActive === 'boolean') return ua.isActive;
+    return performance.now() - this.gestureAt < 1200;
+  }
+
+  /**
+   * Record that we are answering a click/keypress. Browsers without `navigator.userActivation`
+   * fall back to this; UI code that takes the pointer right inside a click handler calls it.
+   */
+  markGesture(): void {
+    this.gestureAt = performance.now();
+  }
+
   exitLock(): void {
-    if (!document.pointerLockElement) return;
+    this.wantLock = false;
     this.expectUnlock = true;
-    document.exitPointerLock();
+    if (document.pointerLockElement) {
+      document.exitPointerLock();
+      return;
+    }
+    // Not locked yet, but a request may still land on the next frame: remember to hand the cursor
+    // back when it does (that is what used to leave a UI card behind a captured pointer). Only a
+    // genuinely pending request counts, or the *next* legit capture would be released too.
+    if (this.pendingRequest) this.releaseOnGrantUntil = performance.now() + 750;
   }
 
   isDown(code: string): boolean {
@@ -266,7 +340,12 @@ export class Input {
     if (this.touch.mine) this.mining = true;
     if (this.touch.place) this.placing = true;
 
-    const sprint = this.isDown('ControlLeft') || this.sprintHold || this.touch.sprint;
+    const sprint =
+      this.isDown('ControlLeft') ||
+      this.isDown('ControlRight') ||
+      this.capsSprint ||
+      this.sprintHold ||
+      this.touch.sprint;
     return { forward, right, jump, sneak, sprint, up, down };
   }
 

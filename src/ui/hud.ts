@@ -24,8 +24,7 @@ export class Hud {
   private hungerRow = el<HTMLElement>('hunger-row');
   private airRow = el<HTMLElement>('air-row');
   private hotbarEl = el<HTMLElement>('hotbar');
-  private hand = el<HTMLElement>('hand-item');
-  private handCanvas = el<HTMLCanvasElement>('hand-item').querySelector('canvas')!;
+  private lockHint = el<HTMLElement>('lock-hint');
   private debugEl = el<HTMLElement>('debug');
   private toastsEl = el<HTMLElement>('toasts');
   private titleEl = el<HTMLElement>('title-card');
@@ -37,8 +36,6 @@ export class Hud {
   private pips: Record<PipKind, HTMLElement[]> = { heart: [], food: [], air: [] };
   private lastHotbar: (HudSlotView | null)[] | null = null;
   private dirty = true;
-  private lastHandId = -1;
-  private swingTimer = 0;
   private titleTimer = 0;
   debugVisible = false;
 
@@ -96,9 +93,15 @@ export class Hud {
     this.fade.classList.toggle('on', v);
   }
 
-  swing(): void {
-    this.hand.classList.add('swing');
-    this.swingTimer = window.setTimeout(() => this.hand.classList.remove('swing'), 200);
+  /**
+   * The held-item view model and its swing live in the renderer (a real 3D arm + item),
+   * so the HUD only mirrors the intent for DOM consumers.
+   */
+  swing(): void {}
+
+  /** "Click the world to capture the mouse" — shown whenever the game wants the pointer. */
+  setLockHint(show: boolean): void {
+    this.lockHint.classList.toggle('hidden', !show);
   }
 
   hurt(): void {
@@ -129,7 +132,7 @@ export class Hud {
   }
 
   /** Redraw hotbar + bars + debug text. */
-  render(m: HudModel, hotbar: (HudSlotView | null)[], selected: number, settings: Settings): void {
+  render(m: HudModel, hotbar: (HudSlotView | null)[], selected: number, _settings: Settings): void {
     if (hotbar !== this.lastHotbar || selected !== this.currentSelection || this.dirty) {
       this.currentSelection = selected;
       this.lastHotbar = hotbar;
@@ -154,18 +157,6 @@ export class Hud {
         }
         s.count.textContent = item && item.count > 1 ? String(item.count) : '';
       }
-      this.lastHandId = -1;
-    }
-    if (m.held) {
-      if (m.held.id !== this.lastHandId) {
-        this.lastHandId = m.held.id;
-        paintItem(this.handCanvas, m.held.id);
-      }
-      this.hand.style.visibility = settings.showHand ? 'visible' : 'hidden';
-    } else if (this.lastHandId !== 0) {
-      this.lastHandId = 0;
-      const ctx = this.handCanvas.getContext('2d');
-      ctx?.clearRect(0, 0, this.handCanvas.width, this.handCanvas.height);
     }
 
     this.updatePips('heart', this.pips.heart, m.health, m.maxHealth);
@@ -220,7 +211,6 @@ export class Hud {
   }
 
   dispose(): void {
-    window.clearTimeout(this.swingTimer);
     window.clearTimeout(this.titleTimer);
   }
 }

@@ -16,12 +16,12 @@ import { moveWithCollision } from './physics.js';
 
 export type MobKind = 'pig' | 'cow' | 'sheep' | 'zombie';
 
-/** [body tile, head tile] for each species */
-const SKIN: Record<MobKind, [number, number]> = {
-  pig: [TILE.PIG, TILE.PIG_HEAD],
-  cow: [TILE.COW, TILE.COW_HEAD],
-  sheep: [TILE.SHEEP, TILE.SHEEP_HEAD],
-  zombie: [TILE.ZOMBIE, TILE.ZOMBIE_HEAD],
+/** [body tile, head tile, face tile] for each species — the face tile carries the eyes (MO-3). */
+const SKIN: Record<MobKind, [number, number, number]> = {
+  pig: [TILE.PIG, TILE.PIG_HEAD, TILE.PIG_FACE],
+  cow: [TILE.COW, TILE.COW_HEAD, TILE.COW_FACE],
+  sheep: [TILE.SHEEP, TILE.SHEEP_HEAD, TILE.SHEEP_FACE],
+  zombie: [TILE.ZOMBIE, TILE.ZOMBIE_HEAD, TILE.ZOMBIE_FACE],
 };
 
 interface MobSpecies {
@@ -168,7 +168,10 @@ export class Mob {
       this.group.remove(child);
       if (child instanceof THREE.Mesh) child.geometry.dispose();
     }
-    const [body, head] = SKIN[this.kind];
+    const [body, head, face] = SKIN[this.kind];
+    // FACES order +y, -y, +x, -x, +z, -z; the -z face is the nose, nudged a little brighter so
+    // the eyes stay readable in a dark cave.
+    const headTints = [1.0, 0.5, 0.74, 0.74, 0.88, 1.05];
     for (const c of this.cubes) {
       const tile = c.head ? head : body;
       const cube: CubeOptions = {
@@ -176,6 +179,8 @@ export class Mob {
         top: tile,
         bottom: tile,
         side: tile,
+        front: c.head ? face : undefined,
+        tints: c.head ? headTints : undefined,
         sky,
         block: blockLight,
         centered: true,

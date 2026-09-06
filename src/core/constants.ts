@@ -15,6 +15,13 @@ export const TICK_RATE = 20; // simulation ticks per second (Appendix A "Tick")
 export const TICK_MS = 1000 / TICK_RATE;
 export const DAY_LENGTH_MS = 10 * 60 * 1000; // RD-5: full cycle = 10 minutes
 
+// ---- input ----
+/** Radians of look per raw mouse pixel at sensitivity 1.0 (halved scale felt sluggish). */
+export const LOOK_PER_PIXEL = 0.0044;
+/** Ignore look deltas this long after pointer lock engages: the recentring is reported as one
+ * enormous movement delta and looked like the sensitivity spiking. */
+export const LOCK_SETTLE_MS = 140;
+
 // ---- physics (PH-2, PH-3) ----
 export const PLAYER_WIDTH = 0.6;
 export const PLAYER_HEIGHT = 1.8;
@@ -65,6 +72,8 @@ export const SCHEMA_VERSION = 1;
 export const MESH_BUDGET_MS = 5.0; // per frame, main-thread meshing
 export const GEN_BATCH = 2; // ≤2 chunks generated per frame equivalent (concurrent worker jobs)
 export const MAX_MOBS = 12;
+/** Chunk radius that must be loaded *and meshed* before the player gets control (WG-6). */
+export const READY_RADIUS = 3;
 
 /** Pack a signed chunk coordinate pair into a single integer map key. */
 export function chunkKey(cx: number, cz: number): number {
@@ -81,4 +90,9 @@ export function clamp(v: number, lo: number, hi: number): number {
 }
 export function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
+}
+/** Hermite smoothstep: 0 at/below e0, 1 at/above e1, smooth in between. */
+export function smoothstep(e0: number, e1: number, x: number): number {
+  const t = clamp((x - e0) / (e1 - e0 || 1e-6), 0, 1);
+  return t * t * (3 - 2 * t);
 }

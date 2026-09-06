@@ -623,6 +623,84 @@ async function main() {
       return `block light ${spot.before} → ${after} around ${JSON.stringify(spot.at)}`;
     });
 
+    // ------------------------------------------------------------ first-person hand + focus UX
+    await step('first-person hand is drawn (view model)', async () => {
+      await page.evaluate(() => {
+        const g = window.webcraft.game;
+        g.inventory.setSlot(0, { id: 3, count: 1 }); // stone
+        g.inventory.select(0);
+      });
+      await page.waitForTimeout(250);
+      const clip = { x: 500, y: 300, width: 380, height: 280 };
+      const withHand = await page.screenshot({ clip });
+      await page.evaluate(() => window.webcraft.game.renderer.setHandVisible(false));
+      await page.waitForTimeout(200);
+      const withoutHand = await page.screenshot({ clip });
+      await page.evaluate(() => window.webcraft.game.renderer.setHandVisible(true));
+      await page.waitForTimeout(200);
+      if (withHand.equals(withoutHand)) throw new Error('hiding the hand did not change the frame');
+      await page.screenshot({ path: join(SHOTS, '08-hand.png') });
+      return 'held block + arm render in a second pass';
+    });
+
+    await step('HUD comes back after the mouse is lost and the game resumes (UI-3)', async () => {
+      // What a tab switch / Esc does: the game pauses, and resuming used to leave the HUD
+      // invisible with the keyboard still swallowed. Resume must restore HUD + capture.
+      await page.keyboard.press('Escape', { pauseDelay: 0 });
+      await page.waitForFunction(() => window.webcraft.game.screen === 'pause', null, { timeout: 4000 });
+      await page.click('#btn-resume');
+      await page.waitForTimeout(500);
+      const state = await page.evaluate(() => ({
+        screen: window.webcraft.game.screen,
+        locked: !!document.pointerLockElement,
+        hud: getComputedStyle(document.getElementById('hud')).display !== 'none',
+        health: document.querySelectorAll('#health-row .pip').length,
+      }));
+      if (state.screen !== 'none') throw new Error('did not return to the world: ' + JSON.stringify(state));
+      if (!state.hud) throw new Error('HUD still hidden after resume: ' + JSON.stringify(state));
+      if (state.health !== 10) throw new Error('health bar did not repaint: ' + JSON.stringify(state));
+      if (!state.locked) throw new Error('resume did not re-capture the mouse: ' + JSON.stringify(state));
+      // and the "click the world" hint follows the world's want-the-mouse state
+      const hint = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const shown = () => getComputedStyle(document.getElementById('lock-hint')).display !== 'none';
+        const wasLocked = g.input.locked;
+        g.input.locked = false; // as if the browser dropped the lock (no pause, UI-only)
+        await new Promise((r) => setTimeout(r, 350));
+        const on = shown();
+        g.input.locked = wasLocked;
+        await new Promise((r) => setTimeout(r, 350));
+        return { on, off: !shown() };
+      });
+      if (!hint.on) throw new Error('click-to-capture hint did not appear while the mouse was free');
+      if (!hint.off) throw new Error('click-to-capture hint stayed on after recapture');
+      return 'HUD + capture + hint all correct across focus loss';
+    });
+
+    await step('night falls gradually instead of snapping (RD-5)', async () => {
+      const ramp = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const samples = [];
+        for (const t of [0.44, 0.46, 0.48, 0.5, 0.52, 0.54, 0.56, 0.58, 0.6, 0.62, 0.66]) {
+          g.record.data.timeOfDay = t;
+          g.timeMs = 0;
+          await new Promise((r) => setTimeout(r, 90));
+          samples.push(+g.nightFactor().toFixed(3));
+        }
+        let maxStep = 0;
+        for (let i = 1; i < samples.length; i++) maxStep = Math.max(maxStep, Math.abs(samples[i] - samples[i - 1]));
+        g.record.data.timeOfDay = 0.74;
+        g.timeMs = 0;
+        return { samples, maxStep, paused: g.screen };
+      });
+      // one sample = 12 in-game seconds; a snap would show up as a single >0.3 step
+      if (ramp.maxStep >= 0.3) throw new Error('night factor jumps: ' + JSON.stringify(ramp));
+      if (!ramp.samples.some((v) => v > 0.1 && v < 0.9)) throw new Error('no twilight band sampled: ' + JSON.stringify(ramp));
+      await page.waitForTimeout(700);
+      await page.screenshot({ path: join(SHOTS, '09-night.png') });
+      return JSON.stringify(ramp.samples);
+    });
+
     // ------------------------------------------------------------ pause, save, quit, reload
     await step('Escape pauses with live world stats', async () => {
       await page.keyboard.press('Escape');

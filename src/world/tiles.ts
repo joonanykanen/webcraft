@@ -47,6 +47,14 @@ export const TILE = {
   SHEEP_HEAD: 43,
   ZOMBIE: 44,
   ZOMBIE_HEAD: 45,
+  // faces carry the eyes and are mapped onto the front face of the head only
+  PIG_FACE: 46,
+  COW_FACE: 47,
+  SHEEP_FACE: 48,
+  ZOMBIE_FACE: 49,
+  // first-person view model (VII)
+  HAND: 50,
+  SLEEVE: 51,
 } as const;
 
 export const CRACK_TILES = [

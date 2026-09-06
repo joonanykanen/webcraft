@@ -5,6 +5,7 @@
  */
 import * as THREE from 'three';
 import { ATLAS_PX, ATLAS_TILES, CHUNK_SX, CHUNK_SZ, TILE_PX, clamp } from '../core/constants.js';
+import { dayNightCurve } from '../core/daynight.js';
 import type { MeshData, Settings } from '../core/types.js';
 import type { Chunk } from '../world/chunk.js';
 import type { MeshSink } from '../world/world.js';
@@ -12,6 +13,7 @@ import type { ChunkMesh } from '../world/mesher.js';
 import { CRACK_TILES } from '../world/tiles.js';
 import { buildAtlasCanvas, tileAverageColor } from './atlas.js';
 import { blockHighlightGeometry, voxelCubeGeometry } from './geometry.js';
+import { HandViewModel } from './viewmodel.js';
 import { CHUNK_FRAG, CHUNK_VERT, SKY_FRAG, SKY_VERT } from './shaders.js';
 
 export interface CameraState {
@@ -21,6 +23,8 @@ export interface CameraState {
   yaw: number;
   pitch: number;
   fov: number;
+  /** Walk-bob phase in radians; drives the idle sway of the view model (VII). */
+  bob: number;
 }
 
 export interface RenderInfo {
@@ -74,6 +78,8 @@ export class Renderer implements MeshSink {
   private fogOverride: THREE.Color | null = null;
   private renderDistance = 8;
   private crackGeometry: THREE.BufferGeometry;
+  /** The player's arm + held item, drawn in its own pass (VII). */
+  readonly hand: HandViewModel;
 
   constructor(canvas: HTMLCanvasElement, settings: Settings, webgl2: boolean) {
     this.settings = settings;
@@ -169,10 +175,10 @@ export class Renderer implements MeshSink {
     this.skyGroup.add(this.skyMesh);
 
     this.sun = new THREE.Sprite(
-      new THREE.SpriteMaterial({ map: makeDiscTexture(false), transparent: true, depthTest: false, depthWrite: false }),
+      new THREE.SpriteMaterial({ map: makeDiscTexture(false), transparent: true, depthTest: true, depthWrite: false }),
     );
     this.moon = new THREE.Sprite(
-      new THREE.SpriteMaterial({ map: makeDiscTexture(true), transparent: true, depthTest: false, depthWrite: false }),
+      new THREE.SpriteMaterial({ map: makeDiscTexture(true), transparent: true, depthTest: true, depthWrite: false }),
     );
     this.sun.renderOrder = -990;
     this.moon.renderOrder = -991;
@@ -193,6 +199,9 @@ export class Renderer implements MeshSink {
     this.scene.add(this.highlight);
 
     this.crackGeometry = voxelCubeGeometry({ size: 1.004, top: 0, bottom: 0, side: 0, sky: 15, block: 15, shade: 1 });
+
+    // ---- first-person view model (VII) ----
+    this.hand = new HandViewModel(this.opaqueMat);
 
     // ---- particles ----
     this.particlePos = new Float32Array(PARTICLE_CAP * 3);
@@ -297,6 +306,7 @@ export class Renderer implements MeshSink {
       this.opaqueMat.needsUpdate = true;
     }
     if (distChanged) this.setRenderDistance(s.renderDistance);
+    this.hand.visible = s.showHand;
   }
 
   setRenderDistance(chunks: number): void {
@@ -306,21 +316,21 @@ export class Renderer implements MeshSink {
     this.camera.updateProjectionMatrix();
     this.uniforms.uFogNear.value = far * 0.55;
     this.uniforms.uFogFar.value = far * 0.95;
-    this.skyMesh.scale.setScalar(far * 0.5);
-    const r = far * 0.42;
-    this.sun.scale.setScalar(Math.max(26, r * 0.09));
-    this.moon.scale.setScalar(Math.max(20, r * 0.07));
+    this.skyMesh.scale.setScalar(far * 0.98);
+    // Sky bodies live on a shell just inside the far plane, and depth-test against the
+    // terrain: with the shell at 42 % of `far` the stars floated in front of distant hills.
+    const r = far * 0.9;
+    this.sun.scale.setScalar(Math.max(26, r * 0.042));
+    this.moon.scale.setScalar(Math.max(20, r * 0.033));
     (this.stars.geometry.getAttribute('position') as THREE.BufferAttribute).needsUpdate = true;
     this.stars.scale.setScalar(r / 400);
   }
 
   /** 0 = sunrise, 0.25 = noon, 0.5 = sunset, 0.75 = midnight (RD-5, 10-minute cycle). */
   setTimeOfDay(t: number): { dayLight: number; night: number } {
-    const angle = t * Math.PI * 2;
-    const elev = Math.sin(angle);
-    const day = clamp(elev * 1.7 + 0.12, 0, 1);
-    const sunset = clamp(1 - Math.abs(elev) * 2.6, 0, 1);
-    const night = clamp(-elev * 2 + 0.2, 0, 1);
+    const c = dayNightCurve(t);
+    const angle = c.t * Math.PI * 2;
+    const { day, sunset, night, elev } = c;
 
     const dayTop = new THREE.Color(0x4f8fdd);
     const dayHorizon = new THREE.Color(0xc8e2ff);
@@ -336,7 +346,7 @@ export class Renderer implements MeshSink {
 
     const sunDir = new THREE.Vector3(Math.cos(angle), elev, 0.28).normalize();
     (this.skyMat.uniforms.uSunDir.value as THREE.Vector3).copy(sunDir);
-    const r = this.camera.far * 0.42;
+    const r = this.camera.far * 0.9;
     this.sun.position.copy(sunDir).multiplyScalar(r);
     this.moon.position.copy(sunDir).multiplyScalar(-r);
     this.sun.visible = elev > -0.25;
@@ -344,7 +354,7 @@ export class Renderer implements MeshSink {
     const mat = this.stars.material as THREE.PointsMaterial;
     mat.opacity = night * 0.9;
 
-    this.dayLight = clamp(0.16 + day * 0.92, 0.16, 1);
+    this.dayLight = c.dayLight;
     this.uniforms.uDayLight.value = this.dayLight;
     return { dayLight: this.dayLight, night };
   }
@@ -458,15 +468,34 @@ export class Renderer implements MeshSink {
     return new THREE.Mesh(voxelCubeGeometry(opts), this.opaqueMat);
   }
 
+  /** Held item of the view model (VII) — `0` shows the bare arm. */
+  setHeldItem(id: number): void {
+    this.hand.setHeld(id);
+  }
+
+  /** One arm swing (mining, attacking, placing). */
+  swingHand(): void {
+    this.hand.swing();
+  }
+
+  setHandVisible(v: boolean): void {
+    this.hand.visible = v;
+  }
+
   // ------------------------------------------------------------ frame
   resize(width: number, height: number): void {
     this.camera.aspect = Math.max(0.2, width / Math.max(1, height));
     this.camera.updateProjectionMatrix();
+    this.hand.setAspect(this.camera.aspect);
     this.three.setPixelRatio(Math.min(window.devicePixelRatio || 1, this.webgl2 ? 2 : 1.25));
     this.three.setSize(width, height, false);
   }
 
   render(cam: CameraState, dt: number): void {
+    // `info` resets on every render() call by default, which would make the debug overlay report
+    // the two-drawal view-model pass instead of the world. Reset once per frame, then accumulate.
+    this.three.info.autoReset = false;
+    this.three.info.reset();
     this.timeMs += dt * 1000;
     this.uniforms.uTime.value = this.timeMs / 1000;
     this.camera.position.set(cam.x, cam.y, cam.z);
@@ -479,7 +508,16 @@ export class Renderer implements MeshSink {
     }
     this.skyGroup.position.copy(this.camera.position);
     this.updateParticles(dt);
+    this.hand.update(dt, cam.bob, this.dayLight);
     this.three.render(this.scene, this.camera);
+    // Second pass for the first-person arm (VII): keep the colour buffer, throw away depth, so the
+    // hand is always in front of the block the player is pressed against.
+    if (this.hand.visible) {
+      this.three.autoClear = false;
+      this.three.clearDepth();
+      this.three.render(this.hand.scene, this.hand.camera);
+      this.three.autoClear = true;
+    }
   }
 
   info(): RenderInfo {
@@ -515,6 +553,7 @@ export class Renderer implements MeshSink {
   }
 
   dispose(): void {
+    this.hand.dispose();
     for (const key of [...this.meshes.keys()]) {
       const chunk = { key } as Chunk;
       this.remove(chunk);
@@ -611,12 +650,14 @@ function makeStars(): THREE.Points {
   g.setAttribute('position', new THREE.BufferAttribute(pos, 3));
   g.setAttribute('color', new THREE.BufferAttribute(col, 3));
   const m = new THREE.PointsMaterial({
-    size: 2.2,
+    size: 2,
     vertexColors: true,
     sizeAttenuation: false,
     transparent: true,
     opacity: 0,
-    depthTest: false,
+    // depthTest:false painted stars on top of everything, so the night sky looked like snow
+    // on the terrain (they live on a shell inside the far plane, so hills occlude them now)
+    depthTest: true,
     depthWrite: false,
     map: makePixelTexture(),
     alphaTest: 0.2,

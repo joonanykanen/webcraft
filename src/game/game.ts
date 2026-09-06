@@ -14,9 +14,12 @@ import {
   MAX_HEARTS,
   MESH_BUDGET_MS,
   PLAYER_REACH,
+  READY_RADIUS,
   TICK_RATE,
+  chunkKey,
   clamp,
 } from '../core/constants.js';
+import { dayNightCurve } from '../core/daynight.js';
 import { BIOME_NAMES, type GameMode, type SaveData, type Settings, type Slot, type Vec3, type WorldRecord } from '../core/types.js';
 import { mulberry32 } from '../core/rng.js';
 import type { AudioBus } from '../audio/audio.js';
@@ -140,6 +143,10 @@ export class Game implements EntityHost {
   private mineKey = '';
   private attackTimer = 0;
   private placeTimer = 0;
+  /** View-model animation state (VII): walk-bob phase and the rhythm of arm swings. */
+  private bobPhase = 0;
+  private swingTimer = 0;
+  private lastHeldId = -1;
   private saveTimer = AUTOSAVE_MS / 1000;
   private dirtySave = false;
   private accumulator = 0;
@@ -258,9 +265,35 @@ export class Game implements EntityHost {
   }
 
   /** 0..1 initial-streaming progress for the loading screen (WG-6). */
+  /**
+   * Loading-phase pump (WG-6): stream, light and mesh the spawn area while the loading card is
+   * up. Progress must reflect *real* work — the previous version only counted chunks that the
+   * boot step had requested, so the bar sat at ~15 % and the world then appeared all at once
+   * when the 15 s safety timeout fired.
+   */
+  pumpReady(budgetMs: number): number {
+    this.world.update(this.player.pos.x, this.player.pos.z, budgetMs, 24);
+    return this.readyProgress();
+  }
+
+  /** 0..1 across the chunks the player lands in: 60 % terrain, 40 % lighting + meshing. */
   readyProgress(): number {
-    const need = (this.world.renderDistance * 2 + 1) ** 2;
-    return clamp(this.world.chunks.size / Math.max(1, need), 0, 1);
+    const r = READY_RADIUS;
+    const pcx = Math.floor(this.player.pos.x / CHUNK_SX);
+    const pcz = Math.floor(this.player.pos.z / CHUNK_SZ);
+    let loaded = 0;
+    let meshed = 0;
+    let total = 0;
+    for (let dx = -r; dx <= r; dx++) {
+      for (let dz = -r; dz <= r; dz++) {
+        total++;
+        const c = this.world.chunks.get(chunkKey(pcx + dx, pcz + dz));
+        if (!c) continue;
+        loaded++;
+        if (!c.dirty) meshed++;
+      }
+    }
+    return (loaded / total) * 0.6 + (meshed / total) * 0.4;
   }
 
   start(): void {
@@ -299,6 +332,7 @@ export class Game implements EntityHost {
    * makes the card's own buttons unclickable.
    */
   setCardCapture(capture: boolean): void {
+    this.input.uiCapture = capture;
     this.input.consumeLook();
     if (capture) {
       this.input.exitLock();
@@ -354,6 +388,13 @@ export class Game implements EntityHost {
     this.renderer.setMiningProgress(this.target, this.mineProgress);
 
     // ---- camera ----
+    const hspeed = Math.hypot(this.player.vel.x, this.player.vel.z);
+    if (this.player.onGround && hspeed > 0.4 && !this.paused) this.bobPhase += frameDt * (3.4 + hspeed * 1.35);
+    const heldId = this.inventory.heldId();
+    if (heldId !== this.lastHeldId) {
+      this.lastHeldId = heldId;
+      this.renderer.setHeldItem(heldId);
+    }
     const cam: CameraState = {
       x: this.player.pos.x,
       y: this.player.eyeY(),
@@ -361,6 +402,7 @@ export class Game implements EntityHost {
       yaw: this.player.yaw,
       pitch: this.player.pitch,
       fov: this.settings.fov + (this.player.sprinting ? 6 : 0) + (this.player.flying ? 4 : 0),
+      bob: this.bobPhase,
     };
     this.renderer.setUnderwater(this.player.headInWater);
     const frameStart = performance.now();
@@ -420,8 +462,9 @@ export class Game implements EntityHost {
     return this.record.data.timeOfDay ?? 0.2;
   }
 
+  /** Night weight for spawning/burning — the renderer's own curve, so light and behaviour agree. */
   nightFactor(): number {
-    return clamp(-Math.sin(this.timeOfDay * Math.PI * 2) * 2 + 0.2, 0, 1);
+    return dayNightCurve(this.timeOfDay).night;
   }
 
   // ------------------------------------------------------------ keys
@@ -490,6 +533,7 @@ export class Game implements EntityHost {
 
     this.attackTimer = Math.max(0, this.attackTimer - dt);
     this.placeTimer = Math.max(0, this.placeTimer - dt);
+    this.swingTimer = Math.max(0, this.swingTimer - dt);
 
     // ---- mining / attacking ----
     if (this.input.mining) {
@@ -497,6 +541,11 @@ export class Game implements EntityHost {
       if (hitMobFirst && this.mobTarget) {
         if (this.attackTimer <= 0) this.attack(this.mobTarget);
       } else if (this.target) {
+        // keep swinging while the button is held, otherwise the arm looks frozen (§VII)
+        if (this.swingTimer <= 0) {
+          this.swingTimer = 0.42;
+          this.renderer.swingHand();
+        }
         this.mineTick(dt, this.target);
       } else {
         this.mineProgress = 0;
@@ -505,6 +554,7 @@ export class Game implements EntityHost {
     } else {
       this.mineProgress = 0;
       this.mineKey = '';
+      this.swingTimer = 0;
     }
 
     // ---- placing / using / eating ----
@@ -515,6 +565,7 @@ export class Game implements EntityHost {
 
   private attack(mob: Mob): void {
     this.attackTimer = ATTACK_COOLDOWN;
+    this.renderer.swingHand();
     const held = this.inventory.heldId();
     const tool = toolOf(held);
     const damage = tool ? tool.damage : 1;
@@ -587,6 +638,7 @@ export class Game implements EntityHost {
   private useHeld(): void {
     const hit = this.target;
     const held = this.inventory.heldId();
+    this.renderer.swingHand();
 
     // 1. interact with blocks that open UIs
     if (hit) {

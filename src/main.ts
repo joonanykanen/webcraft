@@ -74,9 +74,13 @@ function boot(): void {
   window.addEventListener('pagehide', () => void flushSave());
   const unlock = (): void => {
     void audio.ensure();
+    // Remember that the player, not the code, touched the page: pointer lock may only be taken
+    // from a gesture, and doing it after an `await` is what paints Chrome's banner.
+    game?.input.markGesture();
   };
   window.addEventListener('pointerdown', unlock, { once: true });
   window.addEventListener('keydown', unlock, { once: true });
+  window.addEventListener('pointerdown', () => game?.input.markGesture(), true);
 
   menus.show('main');
   if (settings.showTouchControls || (navigator.maxTouchPoints ?? 0) > 0) menus.setTouchVisible(true);
@@ -288,8 +292,12 @@ async function play(record: WorldRecord, fresh: boolean): Promise<void> {
   hud.setDebugVisible(settings.debugOverlay);
   menus.setTouchVisible(settings.showTouchControls || (navigator.maxTouchPoints ?? 0) > 0);
   menus.show('none');
-  g.input.requestLock();
+  // The card is shown first so it owns the cursor: a fresh world opens straight into the tutorial.
   if (isFresh) menus.showTutorialCard('intro');
+  g.input.requestLock();
+  // After `await streamSpawn` there is no user activation left, so the lock usually has to wait
+  // for the next click — say so instead of leaving the player staring at a dead window.
+  hud.setLockHint(!g.input.locked && !menus.tutorialShowing());
   startHudLoop();
 }
 
@@ -298,9 +306,14 @@ function streamSpawn(g: Game): Promise<void> {
   return new Promise((resolve) => {
     const t0 = performance.now();
     const step = (): void => {
-      const p = g.readyProgress();
-      menus.setLoading(0.05 + p * 0.9, p < 1 ? `Generating terrain… ${Math.round(p * 100)}%` : 'Lighting the world…');
-      if (p >= 1 || performance.now() - t0 > 15000) {
+      // Pump the streaming ourselves: nothing else runs the world loop yet, so without this the
+      // bar never moved and the world appeared in one piece when the safety timeout fired.
+      const p = g.pumpReady(9);
+      const pct = Math.round(p * 100);
+      const stage = p < 0.58 ? 'Generating terrain…' : p < 1 ? 'Lighting and meshing…' : 'Ready';
+      menus.setLoading(0.05 + p * 0.95, p < 1 ? `${stage} ${pct}%` : stage);
+      if (p >= 1 || performance.now() - t0 > 25000) {
+        menus.setLoading(1, 'Ready');
         resolve();
         return;
       }
@@ -333,7 +346,11 @@ function onScreen(s: Screen): void {
       invUI?.stash();
       pendingChest = null;
       menus.show('none');
-      hud.setVisible(playing);
+      // `playing` was left false by the pause/death screen, which used to mean "resume from
+      // pause and the HUD never comes back" — ownership of the flag belongs here.
+      playing = true;
+      hud.setVisible(true);
+      hud.setLockHint(!game.input.locked);
       game.input.requestLock();
       break;
     case 'inventory':
@@ -341,10 +358,12 @@ function onScreen(s: Screen): void {
       invUI.build('inventory');
       menus.show('inventory');
       hud.setVisible(false);
+      hud.setLockHint(false);
       break;
     case 'chest':
       menus.show('chest');
       hud.setVisible(false);
+      hud.setLockHint(false);
       break;
     case 'pause':
       playing = false;
@@ -374,6 +393,7 @@ function startHudLoop(): void {
   window.clearInterval(hudTimer);
   hudTimer = window.setInterval(() => {
     if (!game || !playing) return;
+    hud.setLockHint(game.screen === 'none' && !game.input.locked && !menus.tutorialShowing());
     const m = game.hudModel();
     const hotbar: (HudSlotView | null)[] = [];
     for (let i = 0; i < 9; i++) {

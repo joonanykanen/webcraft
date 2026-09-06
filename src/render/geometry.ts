@@ -1,6 +1,6 @@
 /** Small geometry helpers that reuse the chunk material's attribute layout (entities, overlays). */
 import * as THREE from 'three';
-import { ATLAS_TILES } from '../core/constants.js';
+import { ATLAS_TILES, TILE_PX } from '../core/constants.js';
 import { FACES } from '../world/mesher.js';
 
 const CORNER_AB = [
@@ -15,6 +15,12 @@ export interface CubeOptions {
   top: number;
   bottom: number;
   side: number;
+  /**
+   * Tile for the nose/front face (local -z, which is where a mob turned with `rotation.y` looks —
+   * `yaw = atan2(-dx, -dz)` and the heads are modelled toward -z).
+   * Eyes live here so they are not stamped onto the back of the head as well.
+   */
+  front?: number;
   sky?: number;
   block?: number;
   shade?: number;
@@ -22,15 +28,30 @@ export interface CubeOptions {
   centered?: boolean;
   /** per-face tint multipliers (length 6) overriding `shade` */
   tints?: number[];
+  /** non-uniform size in blocks; overrides the uniform `size` when given */
+  scale?: [number, number, number];
 }
+
+/** Index of the local -z face inside `FACES` (+y, -y, +x, -x, +z, -z): the direction a mob faces. */
+const FRONT_FACE = 5;
+
+/**
+ * Largest UV corner that survives the vertex shader's `fract(aUV)` wrap. The chunk shader wraps so
+ * a single greedy-run face can repeat a tile; a corner at exactly 1.0 wrapped back to 0, which
+ * collapsed entity/hand cube faces onto a few texels (mobs looked flat-coloured).
+ */
+const UV_MAX = 1 - 1 / (TILE_PX * 32);
 
 /** A unit cube using the same attributes as chunk meshes, so it shares the chunk material. */
 export function voxelCubeGeometry(opts: CubeOptions): THREE.BufferGeometry {
   const size = opts.size ?? 1;
+  const [sx, sy, sz] = opts.scale ?? [size, size, size];
   const sky = (opts.sky ?? 15) / 15;
   const blk = (opts.block ?? 0) / 15;
   const shade = opts.shade ?? 1;
-  const off = opts.centered ? 0 : 0.5;
+  const ox = opts.centered ? 0 : sx / 2;
+  const oy = opts.centered ? 0 : sy / 2;
+  const oz = opts.centered ? 0 : sz / 2;
   const pos: number[] = [];
   const uv: number[] = [];
   const tile: number[] = [];
@@ -41,16 +62,26 @@ export function voxelCubeGeometry(opts: CubeOptions): THREE.BufferGeometry {
   for (let f = 0; f < 6; f++) {
     const face = FACES[f];
     const t = opts.tints ? opts.tints[f] : face.shade * shade;
-    const tileIndex = f === 0 ? opts.top : f === 1 ? opts.bottom : opts.side;
+    const tileIndex =
+      f === FRONT_FACE && opts.front !== undefined
+        ? opts.front
+        : f === 0
+          ? opts.top
+          : f === 1
+            ? opts.bottom
+            : opts.side;
     for (let c = 0; c < 4; c++) {
       const a = CORNER_AB[c][0];
       const b = CORNER_AB[c][1];
       pos.push(
-        (face.p0[0] + face.u[0] * a + face.v[0] * b - 0.5) * size + off,
-        (face.p0[1] + face.u[1] * a + face.v[1] * b - 0.5) * size + off,
-        (face.p0[2] + face.u[2] * a + face.v[2] * b - 0.5) * size + off,
+        (face.p0[0] + face.u[0] * a + face.v[0] * b - 0.5) * sx + ox,
+        (face.p0[1] + face.u[1] * a + face.v[1] * b - 0.5) * sy + oy,
+        (face.p0[2] + face.u[2] * a + face.v[2] * b - 0.5) * sz + oz,
       );
-      uv.push(a, b);
+      // The chunk shader wraps aUV with fract() so one face can tile a greedy run. A corner at
+      // exactly 1.0 therefore wraps back to 0, which collapsed entity faces onto a handful of
+      // texels (mobs looked flat-coloured, held blocks wrong). Stay just inside the range.
+      uv.push(a === 1 ? UV_MAX : a, b === 1 ? UV_MAX : b);
       tile.push(tileIndex);
       light.push(sky, blk);
       tint.push(t);

@@ -23,7 +23,7 @@ npm run preview
 | Key / button | Action |
 | --- | --- |
 | `W` `A` `S` `D` | Move |
-| `Ctrl` + `W`, double-tap `W`, or double-tap `Shift` | Sprint (uses more food) |
+| `Ctrl` + `W`, double-tap `W`, or `Caps Lock` | Sprint (uses more food). `Caps Lock` exists because macOS binds <kbd>Ctrl</kbd>+<kbd>Space</kbd> to input switching, and `Ctrl`+`W` closes the tab on Windows/Linux |
 | `Space` | Jump · swim upward · hold while flying to rise (120 ms input buffer + coyote time, so a fast tap is never lost) |
 | `Space` ×2 | Toggle flight (creative only) |
 | `Shift` | Sneak (will not walk off an edge) · hold while flying to descend |
@@ -168,7 +168,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 151 vitest tests (9 files, ~10 s, Node environment)
+npm run test         # 170 vitest tests (12 files, ~10 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -199,7 +199,7 @@ new generation in chunks nobody touched).
 ### Browser smoke test
 
 ```
-npm run smoke     # build + vite preview + real Chrome (47 checks, ~2 min)
+npm run smoke     # vite preview + real Chrome (50 checks, ~2 min)
 npm run verify    # check + smoke
 ```
 
@@ -215,7 +215,14 @@ break, so it is not timing-fragile) → RMB placement + a planted crafting table
 recipe crafts it → torch block light (0 → 14) → pause stats → save → quit → **Play again**
 (seed, mined count, inventory, dug cells, the placed table and `nearCraftingTable()` all
 survive IndexedDB) → export to `.webcraft.json` → re-import and play the imported world →
-delete a slot → creative flight + break → settings sliders applied to the live game.
+delete a slot → creative flight + break → settings sliders applied to the live game → the
+first-person arm actually changes the frame (screenshot diff with it hidden) → losing the pointer
+pauses and `Resume` brings HUD + capture back → the night curve has a real twilight band.
+
+**Always `npx vite build` before `npm run smoke`** — the suite serves `dist/`, so a stale build
+produces a cascade of misleading failures (one broken frame-counter reset once produced 17/36).
+`vite preview` also binds IPv6 only here, so probe scripts must use `http://localhost:PORT`,
+not `127.0.0.1`.
 
 **Look at the screenshots.** `smoke/*.png` are part of the test: assertions on numbers pass
 while the frame is obviously wrong. Five real bugs were found that way or by probing what a
@@ -232,7 +239,22 @@ screenshot raised, and all are now covered:
 * `World.heightAt(x, z)` indexed the column array with *fractional* coordinates, so a float
   position returned NaN. A NaN spawn height reached the mob's mesh matrix and rendered as a
   screen-filling garbage triangle. Accessors now floor their input and `MobManager.spawn`
-  refuses non-finite positions.
+  refuses non-finite positions;
+* `voxelCubeGeometry` wrote UV corners of exactly 1.0, and the chunk vertex shader wraps `aUV`
+  with `fract()` (greedy runs need the wrap) — every entity face therefore sampled one texel.
+  Mobs were flat-coloured blobs and mob faces could not show eyes at all; corners now stop just
+  inside the range (`UV_MAX`), covered by a unit test;
+* the sun, moon and stars were drawn with `depthTest: false`, so at night the sky appeared *in
+  front of* hills and trees;
+* `nightFactor()` (mob spawning/burning) used a different day/night ramp than the renderer's
+  sky, so darkness snapped on while the sky still looked like sunset. Both read
+  `core/daynight.ts` now, and the smoke test asserts the twilight band is gradual;
+* the loading gate never pumped `world.update()`, so the bar stuck at ~17 % and the world then
+  popped in fully meshed — progress now reflects chunks generated *and* meshed around spawn;
+* resuming from pause never restored `playing`/the HUD (blank screen after a tab switch), and a
+  pointer-lock request that landed *after* the tutorial card opened captured the mouse behind the
+  card — `Input.uiCapture` plus `releaseOnGrantUntil` makes a grant that is no longer wanted
+  hand the cursor straight back.
 
 Driving notes for whoever edits it next: gameplay is pointer-lock-free (the test sets
 `input.locked`/`input.active` and the held `mining`/`placing` flags), negative `player.pitch`

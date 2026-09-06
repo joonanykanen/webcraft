@@ -388,6 +388,8 @@ function drawTile(t: Tile): void {
       break;
     }
     // ---- mob skins (MO-1 … MO-3): flat-coloured hides with a few distinguishing marks ----
+    // Heads carry fur/ear detail only; the *face* tiles carry the eyes and are mapped onto the
+    // front face alone. Faces without eyes on every side looked like a smeared pink cube.
     case TILE.PIG: {
       t.base([226, 158, 148], 8);
       for (let i = 0; i < 12; i++) t.blob((r() * 16) | 0, (r() * 16) | 0, 1, [206, 132, 124], 5);
@@ -395,11 +397,21 @@ function drawTile(t: Tile): void {
     }
     case TILE.PIG_HEAD: {
       t.base([232, 170, 158], 7);
-      t.rect(3, 5, 5, 6, [28, 22, 26]); // eyes
-      t.rect(10, 5, 12, 6, [28, 22, 26]);
-      t.rect(5, 10, 10, 13, [206, 128, 122]); // snout
-      t.rect(6, 11, 7, 12, [126, 70, 66]);
-      t.rect(9, 11, 10, 12, [126, 70, 66]);
+      t.rect(0, 0, 15, 1, [208, 142, 132]); // brow
+      t.rect(1, 2, 3, 4, [206, 136, 128]); // ear shading
+      t.rect(12, 2, 14, 4, [206, 136, 128]);
+      break;
+    }
+    case TILE.PIG_FACE: {
+      t.base([232, 170, 158], 7);
+      t.rect(0, 0, 15, 1, [208, 142, 132]);
+      t.rect(2, 4, 4, 6, [246, 244, 240]); // eye whites
+      t.rect(11, 4, 13, 6, [246, 244, 240]);
+      t.rect(3, 5, 4, 6, [26, 20, 24]); // pupils
+      t.rect(11, 5, 12, 6, [26, 20, 24]);
+      t.rect(5, 9, 10, 13, [206, 128, 122]); // snout
+      t.rect(6, 10, 7, 11, [126, 70, 66]);
+      t.rect(8, 10, 9, 11, [126, 70, 66]);
       break;
     }
     case TILE.COW: {
@@ -409,13 +421,23 @@ function drawTile(t: Tile): void {
     }
     case TILE.COW_HEAD: {
       t.base([58, 50, 46], 7);
-      t.rect(2, 4, 4, 6, [236, 232, 224]);
-      t.rect(11, 3, 13, 5, [236, 232, 224]);
-      t.rect(2, 7, 4, 8, [30, 26, 28]); // eyes
-      t.rect(11, 7, 13, 8, [30, 26, 28]);
-      t.rect(4, 11, 11, 15, [196, 158, 150]); // muzzle
-      t.rect(5, 12, 6, 13, [110, 76, 72]);
-      t.rect(9, 12, 10, 13, [110, 76, 72]);
+      t.rect(0, 0, 2, 2, [222, 214, 196]); // horn nub
+      t.rect(13, 0, 15, 2, [222, 214, 196]);
+      t.rect(1, 3, 4, 5, [236, 232, 224]); // forehead patch
+      t.rect(10, 2, 14, 4, [236, 232, 224]);
+      break;
+    }
+    case TILE.COW_FACE: {
+      t.base([58, 50, 46], 7);
+      t.rect(0, 0, 2, 1, [222, 214, 196]);
+      t.rect(13, 0, 15, 1, [222, 214, 196]);
+      t.rect(2, 4, 4, 6, [244, 240, 232]); // eye whites
+      t.rect(11, 4, 13, 6, [244, 240, 232]);
+      t.rect(2, 5, 3, 6, [16, 14, 16]); // pupils
+      t.rect(12, 5, 13, 6, [16, 14, 16]);
+      t.rect(4, 10, 11, 15, [196, 158, 150]); // muzzle
+      t.rect(5, 11, 6, 12, [110, 76, 72]);
+      t.rect(9, 11, 10, 12, [110, 76, 72]);
       break;
     }
     case TILE.SHEEP: {
@@ -426,10 +448,20 @@ function drawTile(t: Tile): void {
     }
     case TILE.SHEEP_HEAD: {
       t.base([214, 202, 190], 7);
-      t.rect(3, 5, 5, 6, [32, 28, 30]);
-      t.rect(10, 5, 12, 6, [32, 28, 30]);
-      t.rect(6, 12, 9, 14, [176, 162, 150]);
       for (let x = 0; x < 16; x++) if (x % 3 !== 1) t.set(x, 0, [236, 236, 232]); // wool tuft
+      t.rect(1, 1, 4, 3, [228, 216, 204]);
+      t.rect(11, 1, 14, 3, [228, 216, 204]);
+      break;
+    }
+    case TILE.SHEEP_FACE: {
+      t.base([214, 202, 190], 7);
+      for (let x = 0; x < 16; x++) if (x % 3 !== 1) t.set(x, 0, [236, 236, 232]);
+      t.rect(2, 5, 4, 7, [246, 244, 240]); // eye whites
+      t.rect(11, 5, 13, 7, [246, 244, 240]);
+      t.rect(3, 6, 4, 7, [28, 24, 26]); // pupils
+      t.rect(11, 6, 12, 7, [28, 24, 26]);
+      t.rect(6, 12, 9, 14, [176, 162, 150]); // muzzle
+      t.rect(7, 13, 8, 13, [126, 112, 102]);
       break;
     }
     case TILE.ZOMBIE: {
@@ -441,12 +473,35 @@ function drawTile(t: Tile): void {
     }
     case TILE.ZOMBIE_HEAD: {
       t.base([92, 134, 96], 7);
-      t.rect(2, 6, 5, 8, [24, 30, 26]); // sunken eyes
-      t.rect(10, 6, 13, 8, [24, 30, 26]);
-      t.rect(3, 7, 4, 8, [186, 66, 58]);
-      t.rect(11, 7, 12, 8, [186, 66, 58]);
+      t.rect(0, 0, 15, 1, [74, 112, 80]);
+      for (let i = 0; i < 10; i++) t.set((r() * 16) | 0, (r() * 16) | 0, [72, 112, 80]);
+      break;
+    }
+    case TILE.ZOMBIE_FACE: {
+      t.base([92, 134, 96], 7);
+      t.rect(0, 0, 15, 1, [74, 112, 80]);
+      t.rect(2, 4, 5, 7, [22, 30, 24]); // sunken sockets
+      t.rect(10, 4, 13, 7, [22, 30, 24]);
+      t.rect(3, 5, 4, 6, [255, 198, 72]); // glowing eyes: readable even at night
+      t.rect(11, 5, 12, 6, [255, 198, 72]);
       t.rect(5, 12, 10, 14, [46, 66, 50]); // mouth
-      for (let i = 0; i < 8; i++) t.set((r() * 16) | 0, (r() * 16) | 0, [72, 112, 80]);
+      t.rect(6, 12, 7, 13, [216, 214, 200]); // teeth
+      t.rect(8, 13, 9, 14, [216, 214, 200]);
+      break;
+    }
+    // ---- view model (the player's own arm/sleeve, VII) ----
+    case TILE.HAND: {
+      t.base([228, 180, 142], 7);
+      t.rect(0, 0, 15, 2, [206, 156, 120]);
+      t.rect(3, 7, 12, 8, [198, 148, 114]); // knuckles
+      t.rect(3, 12, 12, 13, [206, 156, 120]);
+      break;
+    }
+    case TILE.SLEEVE: {
+      t.base([76, 120, 168], 8);
+      t.rect(0, 0, 15, 1, [58, 96, 140]);
+      t.rect(0, 14, 15, 15, [58, 96, 140]);
+      for (let i = 0; i < 10; i++) t.set((r() * 16) | 0, 3 + ((r() * 10) | 0), [92, 138, 186]);
       break;
     }
     default: {
