@@ -1,6 +1,7 @@
 node_modules/
 dist/
 smoke/*.png
+smoke/hero.json
 !smoke/.gitkeep
 *.log
 .DS_Store

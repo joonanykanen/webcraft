@@ -1,5 +1,12 @@
 # WebCraft
 
+![Sunset seen from a forested hill: a crescent of sand and a bay of open sea on the left, snow on the far shore, trees throwing long shadows across the grass, and along the bottom the hearts, hunger and nine-slot hotbar of a world that has just been generated.](docs/hero.jpg)
+
+*Sunset at render distance 16 — the top of the slider — hovering 14 blocks above a hill in creative
+mode. One seed, and every texture in the frame is drawn in code: there is not one art file in this
+repository. [`scripts/hero.mjs`](scripts/hero.mjs) shoots it, scoring terrain from the world generator
+before deciding where to stand.*
+
 A voxel sandbox that runs in the browser — no install, no account, no downloads.
 TypeScript + Three.js (WebGL2), procedurally generated everything: terrain, textures,
 icons, sounds. One `npm run dev` and you are punching trees.
@@ -421,6 +428,13 @@ fade/return/pin cycle), `probe-polish.mjs` (full-screen HUD, punch, unlock toast
 prints radians-per-pixel for every combination of pointer lock, free cursor, touch controls and
 left-button-held — the matrix that found the sensitivity bug below. Run them after `npx vite build`
 and open the images.
+
+`hero.mjs` is the same machinery pointed at a different question: not "is it correct" but "what does it
+look like". It scores vantage points from `world.heightAt`/`biomeAt` — relief, water in view, trees,
+peaks on the skyline — before meshing a single chunk, then pins the clock to `t = 0.49` and re-pins it
+on every frame until the shutter opens, because the clock runs and 15 seconds of drift is 2.5 % of a
+cycle. The picture at the top of this file came out of it (`--search` sweeps four seeds × six
+headings, `final <seed> <yaw>` re-shoots one framing at 3200×1800).
 
 `probe-aspect.mjs` is the one that runs in **two engines** — Chrome and Playwright's WebKit, i.e.
 Safari's layout engine (`npx playwright install webkit`) — and prints `camera.aspect` against the
