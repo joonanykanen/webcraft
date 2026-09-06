@@ -754,6 +754,18 @@ async function main() {
         return { ok, at: [x, y, z], id: g.world.getBlock(x, y, z) };
       });
       check('a crafting table can be planted in the world', table.ok && table.id === 20, JSON.stringify(table));
+      // …and a brick stacked *on top* of the surface, so its cell sits at the column height: after a
+      // reload the mesher only walks y < columnHeight, so a stale height map hides it completely
+      const stacked = await page.evaluate(() => {
+        const g = window.webcraft.game;
+        const p = g.player.pos;
+        const x = Math.floor(p.x) + 3;
+        const z = Math.floor(p.z) - 2;
+        const y = g.world.heightAt(x, z) + 1; // directly above the highest solid block
+        const ok = g.world.setBlock(x, y, z, 16) >= 0; // BRICK
+        return { ok, at: [x, y, z], id: g.world.getBlock(x, y, z) };
+      });
+      check('a block can be stacked on top of the terrain', stacked.ok && stacked.id === 16, JSON.stringify(stacked));
     });
 
     // ------------------------------------------------------------ inventory & crafting UI
@@ -1359,6 +1371,145 @@ async function main() {
       await page.screenshot({ path: join(SHOTS, '06-reloaded.png') });
       return JSON.stringify(g);
     });
+
+    await step(
+      'the reloaded brick is drawn, not only stored (a block saved on top of a column must reach the mesh)',
+      async () => {
+        const r = await page.evaluate(async () => {
+          const g = window.webcraft.game;
+          const B = window.webcraft.BlockId;
+          const raf = (n) => new Promise((res) => { let k = 0; const t = () => (++k >= n ? res() : requestAnimationFrame(t)); requestAnimationFrame(t); });
+          const settle = async () => {
+            for (let i = 0; i < 40; i++) {
+              if (g.world.stats.dirty === 0 && g.world.stats.genQueue === 0) break;
+              await raf(10);
+            }
+            await raf(12);
+          };
+          g.input.release();
+          const home = { x: g.player.pos.x, y: g.player.pos.y, z: g.player.pos.z, yaw: g.player.yaw, pitch: g.player.pitch };
+          const savedTime = g.timeOfDay;
+          g.setTimeOfDay(0.25); // noon: no daylight gradient moving between the two frames
+
+          // the brick stacked on the surface before the save (see "RMB places the held block")
+          let T = null;
+          {
+            const p = g.player.pos;
+            const cx = Math.floor(p.x);
+            const cy = Math.floor(p.y);
+            const cz = Math.floor(p.z);
+            for (let dx = -14; dx <= 14 && !T; dx++)
+              for (let dy = -8; dy <= 14 && !T; dy++)
+                for (let dz = -14; dz <= 14 && !T; dz++)
+                  if (g.world.getBlock(cx + dx, cy + dy, cz + dz) === B.BRICK) T = [cx + dx, cy + dy, cz + dz];
+          }
+          if (!T) return { err: 'no stacked brick in the reloaded world' };
+
+          // stand 9.5 blocks away (past any reach, so no highlight box) on ground level with the table
+          const surface = (x, z) => {
+            for (let y = 126; y > 0; y--) {
+              const b = g.world.getBlock(x, y, z);
+              if (b !== B.AIR && b !== B.WATER) return y;
+            }
+            return 1;
+          };
+          let spot = null;
+          for (const [ax, az] of [[0, 1], [0, -1], [1, 0], [-1, 0], [1, 1], [-1, -1]]) {
+            const vx = T[0] + ax * 9;
+            const vz = T[2] + az * 9;
+            if (Math.abs(surface(vx, vz) - T[1]) > 2) continue;
+            spot = { vx, vz };
+            break;
+          }
+          if (!spot) return { err: 'nowhere flat to stand for the shot', table: T };
+          g.player.pos.x = spot.vx + 0.5;
+          g.player.pos.z = spot.vz + 0.5;
+          g.player.pos.y = surface(spot.vx, spot.vz) + 1.02;
+          g.player.vel.x = 0; g.player.vel.y = 0; g.player.vel.z = 0;
+          g.player.yaw = Math.atan2(-(T[0] + 0.5 - g.player.pos.x), -(T[2] + 0.5 - g.player.pos.z));
+          g.player.pitch = 0;
+          await raf(30);
+          await settle();
+
+          const cam = g.renderer.camera;
+          const V = cam.position.constructor;
+          const gl = g.renderer.three.getContext();
+          const WW = gl.drawingBufferWidth, HH = gl.drawingBufferHeight;
+          const toPixel = (wx, wy, wz) => {
+            const v = new V(wx, wy, wz).project(cam);
+            return { x: (v.x * 0.5 + 0.5) * WW, y: (v.y * 0.5 + 0.5) * HH };
+          };
+          g.player.pitch = Math.atan2(T[1] + 0.5 - cam.position.y, Math.hypot(T[0] + 0.5 - cam.position.x, T[2] + 0.5 - cam.position.z));
+          await raf(20);
+
+          /** The table cell, projected — a box no bigger than the block itself, inset by a pixel. */
+          const boxOf = () => {
+            const up = toPixel(T[0] + 0.5, T[1] + 1, T[2] + 0.5);
+            const dn = toPixel(T[0] + 0.5, T[1], T[2] + 0.5);
+            const lf = toPixel(T[0], T[1] + 0.5, T[2] + 0.5);
+            const rt = toPixel(T[0] + 1, T[1] + 0.5, T[2] + 0.5);
+            return {
+              x: Math.round(Math.min(lf.x, rt.x)) + 1,
+              y: Math.round(Math.min(up.y, dn.y)) + 1,
+              w: Math.max(6, Math.round(Math.abs(rt.x - lf.x)) - 2),
+              h: Math.max(6, Math.round(Math.abs(dn.y - up.y)) - 2),
+            };
+          };
+          const grab = async () => {
+            await settle();
+            const b = boxOf();
+            const buf = new Uint8Array(4 * b.w * b.h);
+            gl.readPixels(b.x, b.y, b.w, b.h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+            return { b, buf, cam: [cam.position.x, cam.position.y, cam.position.z] };
+          };
+
+          // (1) the frame as the save left it; (2) the same cell emptied; (3) the same block placed
+          // live. Live placement updates the column height, so (3) always draws — if (1) is (2) then
+          // the reloaded block exists in the world data but never reached the mesh.
+          const reloaded = await grab();
+          g.world.setBlock(T[0], T[1], T[2], B.AIR);
+          const empty = await grab();
+          g.world.setBlock(T[0], T[1], T[2], B.BRICK);
+          const live = await grab();
+
+          const compare = (a, c) => {
+            let same = 0;
+            let moved = 0;
+            for (let i = 0; i < a.buf.length; i += 4) {
+              const d = Math.abs(a.buf[i] - c.buf[i]) + Math.abs(a.buf[i + 1] - c.buf[i + 1]) + Math.abs(a.buf[i + 2] - c.buf[i + 2]);
+              if (d > 24) moved++;
+              else same++;
+            }
+            return { same, moved };
+          };
+          const vsEmpty = compare(reloaded, empty);
+          const vsLive = compare(reloaded, live);
+
+          g.setTimeOfDay(savedTime);
+          g.player.pos.x = home.x; g.player.pos.y = home.y; g.player.pos.z = home.z;
+          g.player.yaw = home.yaw; g.player.pitch = home.pitch;
+          g.player.vel.x = 0; g.player.vel.y = 0; g.player.vel.z = 0;
+          await raf(20);
+          return {
+            table: T,
+            box: reloaded.b,
+            pixels: reloaded.b.w * reloaded.b.h,
+            drift: Math.hypot(...live.cam.map((v, i) => v - reloaded.cam[i])),
+            ...vsEmpty,
+            liveSame: vsLive.same,
+            liveMoved: vsLive.moved,
+            height: g.world.surfaceY(T[0], T[2]),
+            id: g.world.getBlock(T[0], T[1], T[2]),
+          };
+        });
+        if (r.err) throw new Error(r.err);
+        if (r.pixels < 400) throw new Error(`the brick cell covered only ${r.pixels}px — cannot judge it (${JSON.stringify(r.box)})`);
+        if (r.drift > 0.05) throw new Error(`the camera moved between frames (${r.drift.toFixed(3)} blocks)`);
+        check('the reloaded brick hides what is behind it', r.moved > r.pixels * 0.5, `${r.moved}/${r.pixels} px changed when the block was removed`);
+        check('the reloaded brick looks exactly like the same block placed live', r.liveMoved < r.pixels * 0.1, `${r.liveMoved} of ${r.pixels} px differ from the live-placed block`);
+        return `brick at ${r.table.join(',')} filled ${r.pixels}px, ${r.moved} px hidden vs empty, ${r.liveMoved} px off vs live`;
+      },
+    );
 
     // ------------------------------------------------------------ export / import (SV-5)
     let exportPath = null;

@@ -4,7 +4,7 @@
  */
 import { CHUNK_SX, CHUNK_SZ, CHUNK_VOL } from '../core/constants.js';
 import type { GenRequest, GenResponse, WorkerError } from '../core/types.js';
-import { generateChunk } from '../world/worldgen.js';
+import { generateEditedChunk } from '../world/worldgen.js';
 import type { GenPool } from '../world/world.js';
 
 type Done = (cx: number, cz: number, blocks: Uint8Array, biome: Uint8Array, height: Uint8Array) => void;
@@ -87,8 +87,7 @@ export class SyncGenPool implements GenPool {
     const blocks = new Uint8Array(CHUNK_VOL);
     const biome = new Uint8Array(CHUNK_SX * CHUNK_SZ);
     const height = new Uint8Array(CHUNK_SX * CHUNK_SZ);
-    generateChunk(seed, cx, cz, blocks, biome, height);
-    for (let i = 0; i + 1 < diff.length; i += 2) blocks[diff[i]] = diff[i + 1];
+    generateEditedChunk(seed, cx, cz, blocks, biome, height, diff);
     queueMicrotask(() => cb(cx, cz, blocks, biome, height));
   }
 

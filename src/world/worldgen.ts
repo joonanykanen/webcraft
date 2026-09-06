@@ -372,6 +372,57 @@ export function generateChunk(
   }
 }
 
+/**
+ * Replay a chunk's saved edits — flat `[blockIndex, id]` pairs — onto generated chunk data,
+ * keeping the column height map in sync (SV-1 reloads).
+ *
+ * The height map is not decoration: `buildChunkMesh` only walks `y < columnHeight(x, z)` and
+ * `surfaceY()`/spawn checks read it too. Replay the blocks without touching `height` and every
+ * edited cell at or above the generated surface is written into `blocks` but never meshed — an
+ * invisible solid block you can stand on but not see.
+ */
+export function applyChunkDiff(blocks: Uint8Array, height: Uint8Array, diff: ArrayLike<number>): void {
+  const touched = new Set<number>();
+  for (let i = 0; i + 1 < diff.length; i += 2) {
+    const idx = diff[i];
+    if (!(idx >= 0) || idx >= blocks.length) continue;
+    blocks[idx] = diff[i + 1];
+    // blockIndex(x, y, z) = (x * CHUNK_SZ + z) * CHUNK_SY + y → column = idx / CHUNK_SY
+    touched.add(Math.floor(idx / CHUNK_SY));
+  }
+  for (const col of touched) {
+    let h = 0;
+    const base = col * CHUNK_SY;
+    for (let y = CHUNK_SY - 1; y >= 0; y--) {
+      if (blocks[base + y] !== 0) {
+        h = y + 1;
+        break;
+      }
+    }
+    height[col] = h;
+  }
+}
+
+/**
+ * One chunk of terrain plus the player's edits (SV-1).
+ *
+ * Every generation path — worker, main-thread pool, inline spawn generation — goes through here:
+ * replaying a diff by hand updates `blocks` only and leaves stale column heights behind, which is
+ * how reloaded edits turned into invisible blocks.
+ */
+export function generateEditedChunk(
+  seed: number,
+  cx: number,
+  cz: number,
+  blocks: Uint8Array,
+  biome: Uint8Array,
+  height: Uint8Array,
+  diff: ArrayLike<number>,
+): void {
+  generateChunk(seed, cx, cz, blocks, biome, height);
+  applyChunkDiff(blocks, height, diff);
+}
+
 function heightmapFromBlocks(blocks: Uint8Array, out: Uint8Array): Uint8Array {
   for (let i = 0; i < out.length; i++) {
     const base = i * CHUNK_SY;
