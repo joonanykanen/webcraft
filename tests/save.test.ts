@@ -18,6 +18,9 @@ import {
   worldToFile,
 } from '../src/save/codec.js';
 import { World } from '../src/world/world.js';
+import { buildChunkMesh } from '../src/world/mesher.js';
+import { relightChunk } from '../src/world/lighting.js';
+import type { Chunk } from '../src/world/chunk.js';
 import { SyncGenPool } from '../src/workers/pool.js';
 import type { WorldRecord } from '../src/core/types.js';
 
@@ -126,6 +129,80 @@ describe('world diffs survive a reload (SV-2)', () => {
     expect(Object.keys(encoded).length).toBe(1);
     expect((encoded['0,0'] ?? '').length).toBeLessThan(24);
     w.dispose();
+  });
+});
+
+describe('replayed edits are visible (SV-2)', () => {
+  /**
+   * Triangles of the chunk geometry that make up the top face of one column.
+   * `buildChunkMesh` only walks `y < chunk.columnHeight(x, z)`, so a block the height map does not
+   * know about is written into `blocks` and then silently dropped from the mesh: a solid block you
+   * can stand on but not see. Positions are chunk-local and fancy quality never merges runs, so the
+   * top face is exactly two triangles whose centroids sit inside that column at the block's upper y.
+   */
+  function topFaceTriangles(world: World, chunk: Chunk, lx: number, lz: number, yTop: number): number {
+    if (chunk.needsLight) relightChunk(world, chunk);
+    const mesh = buildChunkMesh(world, chunk, 'fancy').opaque;
+    if (!mesh) return 0;
+    const p = mesh.position;
+    const inside = (v: number, c: number): boolean => v > c + 0.01 && v < c + 0.99;
+    let n = 0;
+    for (let t = 0; t + 2 < mesh.index.length; t += 3) {
+      let cx = 0;
+      let cy = 0;
+      let cz = 0;
+      for (let k = 0; k < 3; k++) {
+        const i = mesh.index[t + k] * 3;
+        cx += p[i] / 3;
+        cy += p[i + 1] / 3;
+        cz += p[i + 2] / 3;
+      }
+      if (Math.abs(cy - yTop) < 1e-6 && inside(cx, lx) && inside(cz, lz)) n++;
+    }
+    return n;
+  }
+
+  /** Place a block straight on top of the generated surface, reload the save, mesh it again. */
+  async function reloadOntoSurface(streamThroughPool: boolean): Promise<void> {
+    const seed = 2000082050; // the seed of the "hidden snow blocks" report
+    const mk = () => new SyncGenPool(seed);
+    const a = new World({ seed, pool: mk(), sink: null, renderDistance: 2, quality: 'fancy' });
+    a.prepareSync(8, 8, 1);
+    const ground = a.surfaceY(5, 5);
+    const y = ground + 1; // stacked directly on the surface: index == the column's height
+    a.setBlock(5, y, 5, 17); // snow
+    const serialized = a.serializeChunks();
+    expect(a.surfaceY(5, 5)).toBe(y); // placing it live works …
+    a.dispose();
+
+    const poolB = mk();
+    const b = new World({ seed, pool: poolB, sink: null, renderDistance: 2, quality: 'fancy' });
+    b.applyDiffsFromSave(serialized);
+    if (streamThroughPool) {
+      // the streaming path: requestGeneration → pool → onGenerated (chunk.worker.ts mirrors this)
+      for (let i = 0; i < 8 && !b.getChunk(0, 0); i++) {
+        b.requestGeneration(0, 0);
+        poolB.pump(16);
+        await Promise.resolve(); // SyncGenPool delivers its result on a microtask
+      }
+    } else {
+      b.prepareSync(8, 8, 1); // the inline path used for the spawn area
+    }
+    const chunk = b.getChunk(0, 0);
+    expect(chunk).toBeTruthy();
+    expect(b.getBlock(5, y, 5)).toBe(17);
+    expect(chunk!.columnHeight(5, 5)).toBe(y + 1); // … replaying it must agree about the height
+    expect(b.surfaceY(5, 5)).toBe(y);
+    expect(topFaceTriangles(b, chunk!, 5, 5, y + 1)).toBe(2); // and the block must actually be meshed
+    b.dispose();
+  }
+
+  it('a block stacked on the surface stays visible after a reload (inline generation)', async () => {
+    await reloadOntoSurface(false);
+  });
+
+  it('a block stacked on the surface stays visible after a reload (pooled generation)', async () => {
+    await reloadOntoSurface(true);
   });
 });
 

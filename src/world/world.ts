@@ -21,7 +21,7 @@ import { decodeDiffs, encodeDiffs } from '../save/codec.js';
 import { Chunk } from './chunk.js';
 import { borderSignature, rebuildBlockLight, relightChunk, relightSkyColumn } from './lighting.js';
 import { buildChunkMesh, type ChunkMesh, type MeshWorld } from './mesher.js';
-import { findSpawn, generateChunk, terrainContext, type ColumnInfo } from './worldgen.js';
+import { findSpawn, generateEditedChunk, terrainContext, type ColumnInfo } from './worldgen.js';
 import { isFluid, isOpaque, isSolid } from './blocks.js';
 
 export interface GenPool {
@@ -436,9 +436,10 @@ export class World implements MeshWorld {
     const blocks = new Uint8Array(CHUNK_VOL);
     const biome = new Uint8Array(CHUNK_SX * CHUNK_SZ);
     const height = new Uint8Array(CHUNK_SX * CHUNK_SZ);
-    generateChunk(this.seed, cx, cz, blocks, biome, height);
     const d = this.diffs.get(key);
-    if (d) for (const [i, v] of d) blocks[i] = v;
+    const flat: number[] = [];
+    if (d) for (const [i, v] of d) flat.push(i, v);
+    generateEditedChunk(this.seed, cx, cz, blocks, biome, height, flat);
     const c = new Chunk(cx, cz);
     c.blocks.set(blocks);
     c.biome.set(biome);
