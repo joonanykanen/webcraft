@@ -555,7 +555,7 @@ verdicts and the "no, that is still wrong" callouts came from a human playing th
 | --- | --- |
 | Tokens used | ↑ 188 M prompt · ↓ 1.7 M completion |
 | Average throughput | ~60 tok/s decode |
-| What it produced | 11 commits, ~15.8 k lines of TypeScript, 217 unit tests, 35 real-browser smoke steps (66 checks) |
+| What it produced | 12 commits, ~15.8 k lines of TypeScript, 217 unit tests, 35 real-browser smoke steps (66 checks) |
 
 188 M input tokens is a lot for a project this size, and most of it went on verifying rather than
 writing: build, run the game in a real browser, read the screenshots, run the suite again — plus two
