@@ -1,12 +1,18 @@
 /**
- * Vertical UV convention (RD-3). The atlas is uploaded with flipY = false because the block shader
- * derives a tile's row from the tile index counting down the canvas, so the vertical mirror has to
- * happen inside the tile: `fv = (1.0 - aUV.y) * 0.9375 + 0.03125` in CHUNK_VERT. That only produces
- * right-way-up art if every quad written by the mesher gives its HIGHEST vertex the LARGEST aUV.y.
+ * How a quad's UV reaches its atlas tile (RD-3). Two axes, two different mappings, both easy to get
+ * wrong by a hair:
  *
- * This is the invariant behind "the grass fringe grows at the top of the block, not the bottom" and
- * "a torch's flame is at the top of the stick". The rendered-pixel version lives in the browser smoke
- * test; the geometry half — which also covers hand-built cross quads for torches and plants — is here.
+ *  - **v is mirrored.** The atlas is uploaded with flipY = false because the block shader derives a
+ *    tile's row from the tile index counting down the canvas, so the vertical mirror has to happen
+ *    inside the tile: `fv = (1.0 - aUV.y) * 0.9375 + 0.03125` in CHUNK_VERT. That only produces
+ *    right-way-up art if every quad gives its HIGHEST vertex the LARGEST aUV.y — the invariant behind
+ *    "the grass fringe grows at the top of the block" and "a torch's flame sits on the stick".
+ *  - **u is wrapped.** `fu = fract(aUV.x) * ...` lets one face repeat a tile along a merged run, and
+ *    because a vertex shader runs per vertex *before* interpolation, a corner at exactly 1.0 wraps
+ *    back to 0 — see the second describe below.
+ *
+ * The rendered-pixel versions live in the browser smoke test; the geometry half — which also covers
+ * the hand-built cross quads used by torches — is here.
  */
 import { describe, expect, it } from 'vitest';
 // Vite's ?raw imports (typed by vite/client) give the same text without needing @types/node.
@@ -15,10 +21,11 @@ import rendererSource from '../src/render/renderer.ts?raw';
 import { CHUNK_SX, CHUNK_SZ, CHUNK_SY, blockIndex } from '../src/core/constants.js';
 import { BlockId } from '../src/world/blocks.js';
 import { Chunk } from '../src/world/chunk.js';
-import { buildChunkMesh } from '../src/world/mesher.js';
+import { buildChunkMesh, UV_MAX } from '../src/world/mesher.js';
 import { relightChunk } from '../src/world/lighting.js';
 import { CHUNK_VERT } from '../src/render/shaders.js';
 import { voxelCubeGeometry } from '../src/render/geometry.js';
+import { TILE } from '../src/world/tiles.js';
 import type { MeshData } from '../src/core/types.js';
 
 function chunkWith(paint: (x: number, y: number, z: number) => number): Chunk {
@@ -34,7 +41,7 @@ function chunkWith(paint: (x: number, y: number, z: number) => number): Chunk {
   return c;
 }
 
-type Quad = { tile: number; ys: number[]; vs: number[] };
+type Quad = { tile: number; ys: number[]; us: number[]; vs: number[] };
 
 function quadsOf(data: MeshData | null): Quad[] {
   if (!data) return [];
@@ -44,6 +51,7 @@ function quadsOf(data: MeshData | null): Quad[] {
     out.push({
       tile: data.tile[v[0]],
       ys: v.map((i) => data.position[i * 3 + 1]),
+      us: v.map((i) => data.uv[i * 2]),
       vs: v.map((i) => data.uv[i * 2 + 1]),
     });
   }
@@ -94,6 +102,77 @@ describe('vertical UV convention', () => {
     // would resolve every tile to its mirrored row, so assert the mirror stays inside the tile maths.
     expect(CHUNK_VERT).toContain('(1.0 - aUV.y)');
     expect(CHUNK_VERT).toMatch(/tilePos = vec2\(mod\(aTile, 8\.0\), floor\(aTile \/ 8\.0\)\)/);
+  });
+});
+
+/**
+ * The horizontal half of the same attribute: `aUV.x` is wrapped rather than mirrored, because CHUNK_VERT
+ * does `fract(aUV.x)` so that a single greedy-run face can repeat a tile. A vertex shader evaluates
+ * that per vertex, before the value is interpolated across the face, so a corner written as exactly
+ * 1.0 resolves to the *left* edge of the tile — the quad collapses onto one texel column and paints
+ * whatever happens to live there. Every other face in the game takes its inset from `UV_MAX`; the
+ * hand-written cross quads in `emitCross` did not, and the torch's tile is transparent in that left
+ * margin, so all of its fragments failed the alpha test and torches rendered as nothing at all
+ * ("torches are invisible"). The light still worked, which is what made it look like a texture bug.
+ */
+describe('the horizontal tile wrap (fract runs per vertex, not per fragment)', () => {
+  /** Corners the wrap would swallow: a non-zero u that lands on an integer. */
+  const onWrap = (quads: Quad[]): string[] =>
+    quads
+      .filter((q) => q.us.some((u) => u > 0 && Math.abs(u - Math.round(u)) < 1e-5))
+      .map((q) => `tile ${q.tile} u=[${q.us.join(', ')}]`);
+
+  it('the shader really does wrap u, and only u', () => {
+    expect(CHUNK_VERT).toContain('fract(aUV.x)');
+    // v is mirrored instead of wrapped, so a legal v may still be exactly 0 or 1.
+    expect(CHUNK_VERT).not.toContain('fract(aUV.y)');
+  });
+
+  it('leaves every quad corner inside its tile — merged runs, single faces and crosses alike', () => {
+    // 'fast' so greedy run merging is on: a run face's far corner is the reason the wrap exists.
+    const mesh = buildChunkMesh(
+      { getChunk: () => undefined } as never,
+      chunkWith((x, y, z) =>
+        y === 40 && z <= 6 ? BlockId.STONE : x === 8 && y === 41 && z === 8 ? BlockId.TORCH : 0,
+      ),
+      'fast',
+    );
+    const quads = quadsOf(mesh.opaque);
+    expect(quads.length).toBeGreaterThan(8);
+    // Guard the guard: this mesh must contain a merged run and a cross quad.
+    expect(Math.max(...quads.map((q) => Math.max(...q.us)))).toBeGreaterThan(1.5);
+    expect(quads.filter((q) => q.tile === TILE.TORCH).length).toBe(4);
+    expect(onWrap(quads)).toEqual([]);
+  });
+
+  it('still paints the whole torch tile across a cross quad', () => {
+    // Pulling the corner in is only half the job: it has to stay *just* inside 1, or the flame gets
+    // cropped no matter which way the wrap goes.
+    const mesh = buildChunkMesh(
+      { getChunk: () => undefined } as never,
+      chunkWith((x, y, z) => (x === 8 && y === 41 && z === 8 ? BlockId.TORCH : x === 8 && y === 40 && z === 8 ? BlockId.STONE : 0)),
+      'fast',
+    );
+    const crosses = quadsOf(mesh.opaque).filter((q) => q.tile === TILE.TORCH);
+    expect(crosses.length).toBe(4); // two planes × both windings (the chunk material is FrontSide)
+    for (const q of crosses) {
+      expect(Math.min(...q.us)).toBe(0);
+      expect(Math.max(...q.us)).toBeCloseTo(UV_MAX, 5);
+      expect(Math.max(...q.us)).toBeLessThan(1);
+    }
+  });
+
+  it('entity cubes share the inset instead of writing their own corners', () => {
+    // Cubes are drawn with the chunk material, so the same wrap swallows a raw 1.0 here too.
+    const g = voxelCubeGeometry({ size: 1, top: 3, bottom: 3, side: 3, front: TILE.COW_FACE });
+    const uv = g.getAttribute('aUV');
+    const bad: string[] = [];
+    for (let i = 0; i < uv.count; i++) {
+      const u = uv.getX(i);
+      if (u > 0 && Math.abs(u - Math.round(u)) < 1e-5) bad.push(`vertex ${i} u=${u}`);
+    }
+    expect(bad).toEqual([]);
+    g.dispose();
   });
 });
 

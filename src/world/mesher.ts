@@ -61,6 +61,21 @@ const CORNER_AB = [
 /** light levels are stored 0..15 but uploaded normalized, so scale 15 → 255 exactly */
 const LIGHT_BYTE = 255 / MAX_LIGHT;
 
+/**
+ * Largest UV corner a quad may write.
+ *
+ * CHUNK_VERT wraps `aUV.x` with `fract()` so that one face can repeat a tile along a merged run —
+ * and a vertex shader runs per vertex, *before* the value is interpolated across the face. A corner
+ * at exactly 1.0 therefore wraps back to 0 and the whole quad collapses onto the texel column at
+ * the tile's left edge. For a torch, whose tile is transparent in that margin, every fragment then
+ * failed the alpha test and the block rendered completely invisible. 5e-5 is far above float32
+ * resolution at 1.0 (~6e-8, so `fract()` can never land back on 0) yet small enough that a full
+ * 16-tile run (16 × 5e-5) stays a fraction of one texel off true.
+ *
+ * Only `x` is wrapped: the shader mirrors `aUV.y` with `1.0 - aUV.y` instead, so v may stay 0..1.
+ */
+export const UV_MAX = 1 - 5e-5;
+
 const AO_LEVEL = [0.44, 0.64, 0.83, 1.0];
 const WATER_SURFACE_Y = 0.88;
 
@@ -329,7 +344,7 @@ export function buildChunkMesh(world: MeshWorld, chunk: Chunk, quality: 'fancy' 
             xs[c] = x + face.p0[0] + face.u[0] * au + face.v[0] * b;
             ys[c] = Math.min(y + face.p0[1] + face.u[1] * au + face.v[1] * b, y + yTop);
             zs[c] = z + face.p0[2] + face.u[2] * au + face.v[2] * b;
-            us[c] = au * 0.99995; // keep the last vertex inside its tile so fract() tiling works
+            us[c] = au * UV_MAX; // keep the last vertex inside its tile so fract() tiling works
             vs[c] = b;
           }
           buf.quad(xs, ys, zs, us, vs, tile, sky, blkL, tints);
@@ -357,7 +372,9 @@ function emitCross(
   blk: number,
 ): void {
   const tints = [255, 232, 214, 240];
-  const us = [0, 1, 1, 0];
+  // Hand-built quads need the same UV inset as merged faces (see UV_MAX). A corner at exactly 1 made
+  // fract(aUV.x) wrap the whole torch face onto the tile's transparent left margin: invisible torches.
+  const us = [0, UV_MAX, UV_MAX, 0];
   const vs = [0, 0, 1, 1];
   const a = 0.3;
   const b = 0.7;

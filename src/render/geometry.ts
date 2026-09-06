@@ -1,7 +1,7 @@
 /** Small geometry helpers that reuse the chunk material's attribute layout (entities, overlays). */
 import * as THREE from 'three';
-import { ATLAS_TILES, TILE_PX } from '../core/constants.js';
-import { FACES } from '../world/mesher.js';
+import { ATLAS_TILES } from '../core/constants.js';
+import { FACES, UV_MAX } from '../world/mesher.js';
 
 const CORNER_AB = [
   [0, 0],
@@ -42,13 +42,12 @@ export interface CubeOptions {
 const FRONT_FACE = 5;
 
 /**
- * Largest UV corner that survives the vertex shader's `fract(aUV)` wrap. The chunk shader wraps so
- * a single greedy-run face can repeat a tile; a corner at exactly 1.0 wrapped back to 0, which
- * collapsed entity/hand cube faces onto a few texels (mobs looked flat-coloured).
+ * A unit cube using the same attributes as chunk meshes, so it shares the chunk material.
+ *
+ * Cubes are drawn with the chunk shader, so they inherit its `fract(aUV.x)` tile wrap: every corner
+ * uses the mesher's `UV_MAX` inset rather than a hard 1.0, which would wrap back onto the tile's
+ * left edge and collapse the face onto a handful of texels.
  */
-const UV_MAX = 1 - 1 / (TILE_PX * 32);
-
-/** A unit cube using the same attributes as chunk meshes, so it shares the chunk material. */
 export function voxelCubeGeometry(opts: CubeOptions): THREE.BufferGeometry {
   const size = opts.size ?? 1;
   const [sx, sy, sz] = opts.scale ?? [size, size, size];
@@ -84,9 +83,8 @@ export function voxelCubeGeometry(opts: CubeOptions): THREE.BufferGeometry {
         (face.p0[1] + face.u[1] * a + face.v[1] * b - 0.5) * sy + oy,
         (face.p0[2] + face.u[2] * a + face.v[2] * b - 0.5) * sz + oz,
       );
-      // The chunk shader wraps aUV with fract() so one face can tile a greedy run. A corner at
-      // exactly 1.0 therefore wraps back to 0, which collapsed entity faces onto a handful of
-      // texels (mobs looked flat-coloured, held blocks wrong). Stay just inside the range.
+      // See UV_MAX: the chunk shader wraps aUV with fract() per vertex, so a corner at exactly 1.0
+      // would sample the next tile's left edge instead of this tile's right one.
       const vv = opts.flipV ? 1 - b : b;
       uv.push(a === 1 ? UV_MAX : a, vv === 1 ? UV_MAX : vv);
       tile.push(tileIndex);

@@ -5,3 +5,6 @@ smoke/hero.json
 !smoke/.gitkeep
 *.log
 .DS_Store
+
+# playtest saves dropped in the repo root for debugging
+*.webcraft.json

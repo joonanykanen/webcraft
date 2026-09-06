@@ -830,6 +830,154 @@ async function main() {
       return `block light ${spot.before} → ${after} around ${JSON.stringify(spot.at)}`;
     });
 
+    // A torch lights up the world whether or not it is drawn, so the step above passes with a torch
+    // made of nothing. RD-3 regression: a torch is two hand-built cross quads, and a UV corner written
+    // as exactly 1.0 wraps straight back through the shader's per-vertex `fract(aUV.x)` to the tile's
+    // LEFT edge — the column the torch tile leaves transparent — so every fragment failed the alpha
+    // test and torches rendered as pure air. A discarded fragment is invisible to a unit test, so this
+    // measures the framebuffer: with the sun overhead the light term is already saturated by daylight,
+    // so a torch cannot brighten its surroundings and any pixel that appears over its cell when it is
+    // placed is the torch's own geometry.
+    await step('a torch is drawn, not just lit (RD-3 · the tile wrap must not eat cross quads)', async () => {
+      const r = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        const B = window.webcraft.BlockId;
+        const W_ = g.world;
+        const raf = (n) => new Promise((res) => { let k = 0; const t = () => (++k >= n ? res() : requestAnimationFrame(t)); requestAnimationFrame(t); });
+        const settle = async () => {
+          for (let i = 0; i < 40; i++) {
+            if (W_.stats.dirty === 0 && W_.stats.genQueue === 0) break;
+            await raf(10);
+          }
+          await raf(12);
+        };
+        g.input.release();
+        const savedTime = g.timeOfDay;
+        const home = { x: g.player.pos.x, y: g.player.pos.y, z: g.player.pos.z, yaw: g.player.yaw, pitch: g.player.pitch };
+        const undo = [];
+        const keep = (x, y, z) => undo.push([x, y, z, W_.getBlock(x, y, z)]);
+        g.setTimeOfDay(0.25); // noon, so block light cannot move a single pixel
+
+        // A stone column rising into open sky, with the viewer 9.5 blocks away — past even the
+        // creative reach, so no block-highlight wireframe can drift into the sampled box.
+        const px = Math.round(g.player.pos.x);
+        const pz = Math.round(g.player.pos.z);
+        const surface = (x, z) => {
+          for (let y = 126; y > 0; y--) {
+            const b = W_.getBlock(x, y, z);
+            if (b !== B.AIR && b !== B.WATER) return y;
+          }
+          return 1;
+        };
+        const sy = surface(px, pz);
+        const top = sy + 6; // the torch sits here, on top of the pillar
+        for (let dy = 0; dy < 6; dy++) {
+          keep(px, sy + dy, pz);
+          W_.setBlock(px, sy + dy, pz, B.STONE);
+        }
+        for (let dy = 1; dy <= 3; dy++) {
+          keep(px, top + dy, pz);
+          W_.setBlock(px, top + dy, pz, B.AIR); // nothing above it: the cell must be clear
+        }
+        keep(px, top, pz);
+        W_.setBlock(px, top, pz, B.AIR);
+
+        const vz = pz + 10;
+        const vy = surface(px, vz) + 1;
+        g.player.pos.x = px + 0.5;
+        g.player.pos.z = vz + 0.5;
+        g.player.pos.y = vy;
+        g.player.vel.x = 0; g.player.vel.y = 0; g.player.vel.z = 0;
+        g.player.yaw = 0; // looks down -Z, straight at the pillar
+        g.player.pitch = 0;
+        await raf(20);
+        // Aim with the live camera, so the sampled box is placed by the same maths that drew the frame.
+        const cam = g.renderer.camera;
+        const V = cam.position.constructor;
+        const gl = g.renderer.three.getContext();
+        const WW = gl.drawingBufferWidth, HH = gl.drawingBufferHeight;
+        const toPixel = (wx, wy, wz) => {
+          const v = new V(wx, wy, wz).project(cam);
+          return { x: (v.x * 0.5 + 0.5) * WW, y: (v.y * 0.5 + 0.5) * HH };
+        };
+        g.player.pitch = Math.atan2(top + 0.5 - cam.position.y, Math.hypot(px + 0.5 - cam.position.x, pz + 0.5 - cam.position.z));
+        await raf(20);
+
+        /** The torch cell, projected: a box no bigger than the block it holds, inset by a pixel. */
+        const boxOf = () => {
+          const up = toPixel(px + 0.5, top + 1, pz + 0.5);
+          const dn = toPixel(px + 0.5, top, pz + 0.5);
+          const lf = toPixel(px, top + 0.5, pz + 0.5);
+          const rt = toPixel(px + 1, top + 0.5, pz + 0.5);
+          return {
+            x: Math.round(Math.min(lf.x, rt.x)) + 1,
+            y: Math.round(Math.min(up.y, dn.y)) + 1,
+            w: Math.max(6, Math.round(Math.abs(rt.x - lf.x)) - 2),
+            h: Math.max(6, Math.round(Math.abs(dn.y - up.y)) - 2),
+          };
+        };
+        const grab = async () => {
+          await settle();
+          const b = boxOf();
+          const buf = new Uint8Array(4 * b.w * b.h);
+          gl.readPixels(b.x, b.y, b.w, b.h, gl.RGBA, gl.UNSIGNED_BYTE, buf);
+          return { b, buf, cam: [cam.position.x, cam.position.y, cam.position.z] };
+        };
+
+        const withoutTorch = await grab();
+        W_.setBlock(px, top, pz, 18); // BlockId.TORCH
+        const withTorch = await grab();
+
+        let changed = 0;
+        let changedWarm = 0;
+        const seen = [];
+        for (let i = 0; i < withoutTorch.buf.length; i += 4) {
+          const moved =
+            Math.abs(withTorch.buf[i] - withoutTorch.buf[i]) > 6 ||
+            Math.abs(withTorch.buf[i + 1] - withoutTorch.buf[i + 1]) > 6 ||
+            Math.abs(withTorch.buf[i + 2] - withoutTorch.buf[i + 2]) > 6;
+          if (!moved) continue;
+          changed++;
+          const rr = withTorch.buf[i], gg = withTorch.buf[i + 1], bb = withTorch.buf[i + 2];
+          // torch palette: a brown stick and a yellow flame, both r > g > b with a real spread
+          if (rr > gg && gg >= bb && rr - bb > 12 && rr > 55) changedWarm++;
+          if (seen.length < 8) seen.push(`${rr},${gg},${bb}`);
+        }
+
+        // ---- put the world back exactly as it was ----
+        for (let i = undo.length - 1; i >= 0; i--) {
+          const [x, y, z, id] = undo[i];
+          W_.setBlock(x, y, z, id);
+        }
+        g.player.pos.x = home.x; g.player.pos.y = home.y; g.player.pos.z = home.z;
+        g.player.yaw = home.yaw; g.player.pitch = home.pitch;
+        g.player.vel.x = 0; g.player.vel.y = 0; g.player.vel.z = 0;
+        g.setTimeOfDay(savedTime);
+        await raf(20);
+        return {
+          box: withoutTorch.b,
+          pixels: withoutTorch.b.w * withoutTorch.b.h,
+          changed,
+          changedWarm,
+          seen,
+          drift: Math.hypot(...withTorch.cam.map((v, i) => v - withoutTorch.cam[i])),
+          light: W_.getBlockLight(px, top, pz),
+        };
+      });
+      if (r.pixels < 400) throw new Error(`the torch cell covered only ${r.pixels}px — cannot judge it (${JSON.stringify(r.box)})`);
+      if (r.drift > 0.05) throw new Error(`the camera moved between the two frames (${r.drift.toFixed(3)} blocks)`);
+      if (r.changed < 30) {
+        throw new Error(
+          `placing a torch changed ${r.changed} of ${r.pixels} px — the cross quads are drawn with nothing on them ` +
+            `(a UV corner at exactly 1.0 wraps onto the tile's transparent margin); ${JSON.stringify(r.box)}`,
+        );
+      }
+      if (r.changedWarm < 20) {
+        throw new Error(`the ${r.changed} pixels a torch changed are not torch-coloured (only ${r.changedWarm} warm): ${r.seen.join(' ')}`);
+      }
+      return `${r.changed}px appeared over the torch cell, ${r.changedWarm} in torch colours (box ${r.box.w}×${r.box.h}, camera still after ${r.drift.toFixed(4)} blocks)`;
+    });
+
     // ------------------------------------------------------------ first-person hand + focus UX
     await step('first-person hand is drawn (view model)', async () => {
       await page.evaluate(() => {
