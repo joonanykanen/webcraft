@@ -82,6 +82,10 @@ export interface HudModel {
   targetBlock: number;
   /** Look radians applied in the last frame, per source (F3: shows double-counting directly). */
   look: string;
+  /** Look totals while no button is held, and while one is (BI-2). Compare `rad/ct`. */
+  lookFree: string;
+  lookHeld: string;
+  lookProbe: string;
   ready: number;
   seed: number;
   webgl2: boolean;
@@ -500,6 +504,52 @@ export class Game implements EntityHost {
   /** Look radians per source in the last consumed frame (F3; also how the look-gain probes read). */
   lastLookMix: LookMix = emptyLookMix();
   private sessionLookMix: LookMix = emptyLookMix();
+
+  /**
+   * Three F3 lines for the "any mouse button held makes the mouse far too sensitive" report (BI-2).
+   *
+   * `free` and `held` are the same measurements taken in the two button states, and each ends in
+   * `rad/ct` — radians per unit of measured movement. `req` is look *offered* by the input stream, before
+   * the per-frame ceiling: comparing input-side gain is the point, and it keeps the ratio honest when the
+   * frame rate dips in one state (the ceiling would otherwise shrink one side and lie about the mouse).
+   * That ratio is the whole point: it is
+   * state-compared, so it needs no knowledge of how far the mouse physically travelled and nothing from
+   * an automated environment that cannot reproduce the bug. Wiggle the mouse the same way with and
+   * without a button held, then read the two numbers.
+   *
+   *   equal rad/ct, but held has far more counts  -> the *events* changed: OS pointer acceleration
+   *                                                  re-engaging for drags, or lock falling back
+   *   different rad/ct                            -> *our* maths changed between the two states
+   *   dupEvents > 0                               -> the same event arriving at the maths twice
+   *   lockChangesWhileHeld > 0                    -> pressing a button costs us pointer lock
+   */
+  private describeLookProbe(): { lookFree: string; lookHeld: string; lookProbe: string } {
+    const st = this.input.lookStats;
+    const line = (
+      state: 'free' | 'held',
+      w: { events: number; counts: number; rad: number; rejected: number; discarded: number },
+      ratio?: string,
+    ) =>
+      // The F3 key column already names the state, so the value does not repeat it (the line has to fit).
+      `${w.events} ev · ${Math.round(w.counts)} ct · ${w.rad.toFixed(1)} req · ` +
+      `${this.input.radPerCount(state).toFixed(5)} rad/ct · rej ${w.rejected}` +
+      // Events measured but thrown away because the world did not own the mouse. Worth a row of its own:
+      // "held has counts but no rad" is the fingerprint of losing capture mid-drag, and a row that only
+      // appears in the broken state is worse than no row — so it is appended only when it happens.
+      (w.discarded ? ` · no-capture ${w.discarded}` : '') +
+      (ratio ? ` · ${ratio}` : '');
+    const free = this.input.radPerCount('free');
+    const held = this.input.radPerCount('held');
+    const ratio = free > 0 && held > 0 ? (held / free).toFixed(2) + 'x' : undefined;
+    return {
+      lookFree: line('free', st.free),
+      lookHeld: line('held', st.held, ratio ? `ratio ${ratio}` : undefined),
+      lookProbe:
+        `mode ${this.input.lookMode} · drag×${this.input.dragComp.toFixed(2)} · dup ${st.dupEvents} · max ${st.maxPerFrame}/frame` +
+        ` · settle-drop ${st.settleDropped} · lock Δ${st.lockChanges} (${st.lockChangesWhileHeld} after press)` +
+        ` · buttons ${st.buttons} · free median ${this.input.freeMedian().toFixed(0)} ct · F7 mode · F8 drag×`,
+    };
+  }
 
   /** One F3 line that answers "where did that rotation come from?" — see Input.addLook(). */
   private describeLookMix(): string {
@@ -958,6 +1008,7 @@ export class Game implements EntityHost {
       reach: this.target ? this.target.dist : null,
       targetBlock: this.target ? this.target.block : 0,
       look: this.describeLookMix(),
+      ...this.describeLookProbe(),
       ready: this.readyProgress(),
       seed: this.seed,
       webgl2: info.webgl2,

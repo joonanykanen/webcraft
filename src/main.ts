@@ -38,6 +38,10 @@ declare global {
       readonly build: string;
       /** Sweep every inventory slot's icon against what the slot actually holds, repair and report. */
       readonly auditUI: () => string;
+      /** Button-split look statistics (BI-2); pass true to zero them for a clean A/B. */
+      readonly lookStats: (reset?: boolean) => unknown;
+      readonly setLookMode: (mode: 'session' | 'adaptive' | 'raw') => string;
+      readonly setDragComp: (scale: number) => string;
     };
   }
 }
@@ -64,6 +68,32 @@ function boot(): void {
     version: '1.0.0',
     build: __BUILD_ID__,
     auditUI: () => invUI?.auditPainting() ?? 'no inventory panel is open',
+    lookStats: (reset?: boolean) => {
+      if (!game) return 'no game';
+      if (reset) game.input.resetLookStats();
+      const i = game.input;
+      return {
+        stats: i.lookStats,
+        radPerCount: { free: i.radPerCount('free'), held: i.radPerCount('held') },
+        mode: i.lookMode,
+        dragComp: i.dragComp,
+        freeMedianCounts: i.freeMedian(),
+        usingLock: i.usingLock,
+        locked: i.locked,
+        sensitivity: i.sensitivity,
+      };
+    },
+    setLookMode: (mode) => {
+      if (game) game.input.lookMode = mode;
+      return game ? game.input.lookMode : 'no game';
+    },
+    setDragComp: (scale) => {
+      if (game) {
+        game.input.dragComp = Math.min(4, Math.max(0.05, scale));
+        game.input.resetLookStats();
+      }
+      return game ? String(game.input.dragComp) : 'no game';
+    },
   };
   // Which build is this? Shown under the title so "still broken" can be answered before anything else.
   const stamp = document.getElementById('build-stamp');
@@ -137,6 +167,41 @@ function onGlobalKey(e: KeyboardEvent): void {
     e.preventDefault();
     const pinned = hud.toggleMilestonePinned();
     notify(pinned ? 'Goal card pinned' : 'Goal card will fade out');
+    return;
+  }
+  if (e.code === 'F9') {
+    // Zero the button-split look windows so a free-vs-held comparison starts from nothing. On a key
+    // rather than a console call for a boring reason: opening devtools takes the mouse away from the
+    // page, which is the exact thing being measured.
+    e.preventDefault();
+    if (!game) return;
+    game.input.resetLookStats();
+    game.hooks.onToast('Look counters cleared — now wiggle, with and without a button held', 'info');
+    return;
+  }
+  if (e.code === 'F7' || e.code === 'F8') {
+    // BI-2 diagnostics, on keys so the experiment works without devtools (opening devtools drops the
+    // mouse, which pollutes the very thing being measured). F7 cycles how much the look pipeline
+    // mediates the stream; F8 multiplies look while a button is held, which is the direct test for
+    // "the deltas themselves get bigger during a drag".
+    e.preventDefault();
+    if (!game) return;
+    if (e.code === 'F7') {
+      const order = ['session', 'adaptive', 'raw'] as const;
+      const next = order[(order.indexOf(game.input.lookMode) + 1) % order.length];
+      game.input.lookMode = next;
+      game.hooks.onToast(`Look mode: ${next}${next === 'raw' ? ' (no ceilings — diagnostic)' : ''}`, 'info');
+    } else {
+      const steps = [1, 0.5, 0.34, 1.5];
+      const at = steps.indexOf(game.input.dragComp);
+      const next = steps[(at + 1) % steps.length];
+      game.input.dragComp = next;
+      game.input.resetLookStats();
+      game.hooks.onToast(
+        next === 1 ? 'Look while held: normal' : `Look while held: ×${next} (drag compensation on)`,
+        'info',
+      );
+    }
     return;
   }
   if (e.code === 'F3') {

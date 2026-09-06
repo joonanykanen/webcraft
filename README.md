@@ -176,7 +176,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 212 vitest tests (14 files, ~11 s, Node environment)
+npm run test         # 219 vitest tests (14 files, ~11 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -394,6 +394,62 @@ rejects a *pile* of ordinary ones, which is the other shape "sensitivity jumps w
 take — a hitch, a backgrounded tab, an engine that queues input while a button is down. Both discards are
 counted, so a clamp hiding a real bug is itself visible.
 
+### When a bug you can feel cannot be reproduced here: the look probe (BI-2)
+
+The report came in as "holding the mouse button makes the sensitivity skyrocket", then, more usefully: *"it
+doesn't matter which button — right, middle, even the browser back/forward buttons."* That detail rules out
+every action the game binds (nothing is bound to middle or back/forward), so the trigger is the raw press —
+and it leaves two families of cause, which need completely different fixes:
+
+1. **the deltas themselves get bigger** while a button is held — macOS re-applies pointer acceleration to a
+   button-held drag, or pointer lock quietly drops to the cursor-hidden path;
+2. **our maths apply them differently** — a listener attached twice, a second look source, or a ceiling that
+   happens to bite in only one of the two states.
+
+Neither can be observed from a headless browser: there is no real device, no OS acceleration curve, and
+synthetic events are untrusted. So instead of guessing, the build measures it in the hands where it happens.
+Three F3 rows, always available:
+
+```
+look  mouse 3741 moves · 121.0 rad (0.03/move) · 3738 movement / 3 clientXY · drag 0.0 rad
+  free  1204 ev · 6020 ct · 106.0 req · 0.01760 rad/ct · rej 0
+  held   388 ev · 1940 ct ·  34.2 req · 0.01760 rad/ct · rej 0 · ratio 1.00x
+ probe mode session · drag×1.00 · dup 0 · max 12/frame · settle-drop 0 · lock Δ2 (0 after press) ·
+        buttons 0 · free median 5 ct · F7 mode · F8 drag×
+```
+
+`F9` clears the two counters so a comparison starts from nothing — on a key rather than a console call,
+because opening devtools takes the mouse away from the page, which is the thing being measured.
+
+Wiggle the mouse the same way with no button held, then with one held, and read `ratio`:
+
+| reading | meaning |
+| --- | --- |
+| `ratio ≈ 1`, `held` has far more `ct` than `events` would suggest | the events themselves got bigger — OS/browser acceleration during drags. The fix is a compensation (`F8` proves it, `adaptive` fixes it) |
+| `ratio` well away from 1 | our own maths differ between the two states — look for a second consumer or a state-dependent clamp |
+| `dup` > 0 | the same event object reaching the maths twice (duplicated listeners) |
+| `no-capture N` on a row, or `lock Δn (m after press)` | pressing a button costs us pointer lock, so the exact-delta source is replaced mid-drag |
+| `settle-drop` large | look swallowed inside `LOCK_SETTLE_MS` of the lock being granted (dead mouse, not fast mouse) |
+
+`req` is look *offered* by the stream, before the per-frame ceiling: input-side gain is what the comparison
+is about, and using it keeps the ratio honest if the frame rate dips in one state only.
+
+Two dials, bound to keys so the experiment works without devtools (opening devtools drops the mouse, which
+pollutes the thing being measured): **`F7`** cycles how much the pipeline mediates the stream — `session`
+(the shipped behaviour) → `adaptive` (cap each event against recent *button-free* motion, which shaves an
+inflated drag delta back to the size an ordinary move of the same effort produces) → `raw` (no ceilings at
+all: if the spike survives `raw`, nothing we do to the numbers is responsible). **`F8`** multiplies look
+*only while a button is held* (1 → ×0.5 → ×0.34 → ×1.5): if a low value makes the spike disappear, the deltas
+themselves are the problem and the fix is a compensation rather than a clamp. **`F9`** zeroes the counters. Both announce themselves as a
+toast, and `probe mode` / `drag×` on F3 always show the current state, so a screenshot carries it.
+
+For the console: `webcraft.lookStats(true)` returns the whole structure (and zeroes the windows for a clean
+A/B), `webcraft.setLookMode('adaptive')` and `webcraft.setDragComp(0.34)` set the dials directly.
+`scripts/probe-lookprobe.mjs` checks the instrument itself in a real browser under real pointer lock: it
+feeds equal known deltas in both button states and **requires `ratio` 1.00x** — an instrument that is
+asymmetric by construction would manufacture the very anomaly it is meant to measure, so that assertion is
+the baseline that makes every other reading trustworthy.
+
 One experiment in this area was wrong and is recorded as such: selecting the measurement source by capture
 state ("locked means `movement`, free means `client`") was tried, and three existing tests failed
 immediately — it throws away the exact measurement in the cursor-hidden fallback and makes the gain depend
@@ -412,7 +468,8 @@ asymmetric tiles land the right way up on block faces), `probe-slots.mjs` (every
 bounding box, at several viewport sizes and in both engines — the shape a "ghost item outside its slot"
 report would leave behind), `probe-goals.mjs` (the next-goal card's
 fade/return/pin cycle), `probe-polish.mjs` (full-screen HUD, punch, unlock toast, pause) and
-`probe-lookgain.mjs`, which dispatches synthetic pointer+mouse events with *known* pixel deltas and
+`probe-lookprobe.mjs` (checks the button-split look
+instrument under real pointer lock, and the `F7`/`F8` dials), `probe-lookgain.mjs`, which dispatches synthetic pointer+mouse events with *known* pixel deltas and
 prints radians-per-pixel for every combination of pointer lock, free cursor, touch controls and
 left-button-held — the matrix that found the sensitivity bug below. Run them after `npx vite build`
 and open the images.

@@ -311,6 +311,10 @@ export class Hud {
       ['held', hold],
       ['target', m.targetBlock ? `${itemName(m.targetBlock)} @ ${m.reach?.toFixed(2)}m` : 'none'],
       ['look', m.look],
+      // BI-2: compare the two rad/ct figures; the probe line explains what each counter means.
+      ['  free', m.lookFree],
+      ['  held', m.lookHeld],
+      [' probe', m.lookProbe],
       ['state', `${m.mode} · ${m.quality} · webgl${m.webgl2 ? '2' : '1'}${m.flying ? ' · fly' : ''}${m.sneaking ? ' · sneak' : ''}${m.onGround ? '' : ' · air'}`],
       ['mined', `${m.stats.blocksMined} · placed ${m.stats.blocksPlaced} · deaths ${m.deaths}`],
       ['seed', String(m.seed)],

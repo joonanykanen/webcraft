@@ -336,3 +336,123 @@ describe('movement snapshot (PH-2 sprint, PH-3 jump)', () => {
     expect(input.consumeWheel()).toBe(0); // the app reads the accumulated value once per tick
   });
 });
+
+/**
+ * The "any mouse button held makes the mouse far too sensitive" report (BI-2). That cannot be reproduced
+ * in a headless browser, so what is tested here is the *instrument* that measures it in the player's own
+ * hands: the button-split accounting, the duplicated-event detector, and the two dials (F7 look mode,
+ * F8 held-drag multiplier) that turn a report into an experiment. If those work, the two F3 lines
+ * (`free` / `held`) are trustworthy, and their `rad/ct` figures say whether the deltas changed or our
+ * maths changed — without needing a machine that can feel the bug.
+ */
+describe('button-held look probe (BI-2)', () => {
+  const move = (opts: {
+    mx?: number;
+    my?: number;
+    cx?: number;
+    cy?: number;
+    buttons?: number;
+    t?: number;
+  }) =>
+    ({
+      movementX: opts.mx ?? 0,
+      movementY: opts.my ?? 0,
+      clientX: opts.cx ?? 100,
+      clientY: opts.cy ?? 100,
+      buttons: opts.buttons ?? 0,
+      timeStamp: opts.t ?? 1000,
+      getModifierState: () => false,
+    }) as unknown as MouseEvent;
+
+  const captured = () => {
+    const input = new Input();
+    input.setActive(true);
+    input.capture();
+    return input;
+  };
+
+  it('is symmetric: identical input gives identical rad/ct held or free', () => {
+    // The instrument's own baseline. If this ever fails, the harness is lying and its numbers must not
+    // be used to judge anything.
+    const input = captured();
+    for (let i = 0; i < 5; i++) input.handleMouseMove(move({ mx: 4, my: 0, t: 100 + i }));
+    for (let i = 0; i < 5; i++) input.handleMouseMove(move({ mx: 4, my: 0, buttons: 1, t: 200 + i }));
+    expect(input.radPerCount('free')).toBeCloseTo(input.radPerCount('held'), 12);
+    expect(input.lookStats.free.events).toBe(5);
+    expect(input.lookStats.held.events).toBe(5);
+    expect(input.lookStats.free.counts).toBe(20);
+    expect(input.lookStats.held.counts).toBe(20);
+  });
+
+  it('counts the same event arriving twice, which is what duplicated listeners look like', () => {
+    const input = captured();
+    const evt = move({ mx: 6, my: 2, t: 555 });
+    input.handleMouseMove(evt);
+    input.handleMouseMove(evt); // a second listener attached to the same event
+    expect(input.lookStats.dupEvents).toBe(1);
+    input.handleMouseMove(move({ mx: 6, my: 2, t: 556 })); // new timeStamp = a real second event
+    expect(input.lookStats.dupEvents).toBe(1);
+  });
+
+  it('scales only the held state when the drag multiplier is on', () => {
+    const input = captured();
+    input.dragComp = 0.5;
+    input.handleMouseMove(move({ mx: 8, my: 0, t: 10 }));
+    const free = input.lookDX;
+    input.handleMouseMove(move({ mx: 8, my: 0, buttons: 2, t: 20 }));
+    const total = input.lookDX;
+    expect(total - free).toBeCloseTo(free * 0.5, 10);
+    expect(input.radPerCount('held')).toBeCloseTo(input.radPerCount('free') * 0.5, 10);
+  });
+
+  it('shaves oversized deltas back to the size of ordinary free motion when adaptive', () => {
+    const input = captured();
+    input.lookMode = 'adaptive';
+    for (let i = 0; i < 64; i++) input.handleMouseMove(move({ mx: 2, my: 0, t: 1000 + i }));
+    expect(input.freeMedian()).toBe(2);
+    input.consumeLook(); // drain the reference motion, then measure one event in isolation
+    const cap = 2 * LOOK_PER_PIXEL * 4; // four times an ordinary move, in radians
+    input.handleMouseMove(move({ mx: 400, my: 0, buttons: 1, t: 5000 }));
+    expect(input.lookDX).toBeLessThanOrEqual(cap + 1e-12);
+    expect(input.lookDX).toBeGreaterThan(0);
+    expect(input.lookStats.held.rejected).toBe(1);
+  });
+
+  it('passes a huge delta through untouched in raw mode', () => {
+    // The point of the mode: if the spike survives with every ceiling off, nothing we do to the numbers
+    // is responsible for it.
+    const input = captured();
+    input.lookMode = 'raw';
+    input.handleMouseMove(move({ mx: 400, my: 0, buttons: 1, t: 4000 }));
+    expect(input.lookDX).toBeCloseTo(400 * LOOK_PER_PIXEL, 10);
+    expect(input.consumeLook().dx).toBeCloseTo(400 * LOOK_PER_PIXEL, 10); // frame ceiling off too
+    expect(input.framesClamped).toBe(0);
+  });
+
+  it('counts events it cannot use, so losing capture cannot look like no input', () => {
+    // A button press that silently costs us pointer lock is one hypothesis for the spike. If the
+    // instrument recorded nothing in that state, the hypothesis would be unfalsifiable from the F3
+    // overlay — so events are counted whether or not the world owned the mouse, and the ones it threw
+    // away are tallied separately.
+    const input = captured();
+    input.handleMouseMove(move({ mx: 3, my: 0, buttons: 1, t: 3 }));
+    input.setActive(false); // the world let go of the mouse (menu opened, lock lost, focus gone)
+    input.handleMouseMove(move({ mx: 9, my: 0, buttons: 1, t: 4 }));
+    expect(input.lookStats.held.events).toBe(2);
+    expect(input.lookStats.held.counts).toBe(12);
+    expect(input.lookStats.held.discarded).toBe(1);
+    // The applied total therefore under-counts the measured total: rad/ct drops below what the raw
+    // stream would give, which is what "held but no control" looks like on screen.
+    expect(input.radPerCount('held')).toBeLessThan(input.lookStats.held.counts * LOOK_PER_PIXEL);
+  });
+
+  it('resets without disturbing the session totals that other diagnostics depend on', () => {
+    const input = captured();
+    input.handleMouseMove(move({ mx: 5, my: 0, buttons: 1, t: 7 }));
+    const seen = input.movesSeen;
+    input.resetLookStats();
+    expect(input.lookStats.held.events).toBe(0);
+    expect(input.movesSeen).toBe(seen);
+    expect(input.sessionLookFromMouse).toBeGreaterThan(0);
+  });
+});
