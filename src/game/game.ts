@@ -19,7 +19,6 @@ import {
   clamp,
 } from '../core/constants.js';
 import { DayClock, dayNightCurve } from '../core/daynight.js';
-import type { LookWindow } from '../game/input.js';
 import { BIOME_NAMES, type GameMode, type SaveData, type Settings, type Slot, type Vec3, type WorldRecord } from '../core/types.js';
 import { mulberry32 } from '../core/rng.js';
 import type { AudioBus } from '../audio/audio.js';
@@ -83,10 +82,8 @@ export interface HudModel {
   targetBlock: number;
   /** Look radians applied in the last frame, per source (F3: shows double-counting directly). */
   look: string;
-  /** Look totals while no button is held, and while one is (BI-2). Compare `rad/ct`. */
-  lookFree: string;
-  lookHeld: string;
-  lookProbe: string;
+  /** What the mouse actually has: Pointer Lock, the cursor-hidden fallback, and why. */
+  lock: string;
   ready: number;
   seed: number;
   webgl2: boolean;
@@ -109,6 +106,9 @@ export interface GameHooks {
   onOpenChest(slots: Slot[], label: string): void;
   /** optional: a keyboard shortcut changed a setting, so the shell can persist it */
   onSettingsChanged?(settings: Settings): void;
+  /** Pointer Lock proved unusable in this browser and was given up on; the shell explains it and
+   * remembers, so the next session does not walk into the same bug. */
+  onLookDegraded?(): void;
 }
 
 export interface GameOptions {
@@ -237,6 +237,7 @@ export class Game implements EntityHost {
       const view = this.milestones.views().find((v) => v.def.id === def.id);
       if (view) this.hooks.onMilestone(view);
     };
+    this.input.onLookDegraded = () => this.hooks.onLookDegraded?.();
     this.input.onLockChange = (locked) => {
       if (!locked && this.screen === 'none' && this.running) {
         // Escape is handled by the browser here: it exits pointer lock and the page may or may not
@@ -507,60 +508,18 @@ export class Game implements EntityHost {
   private sessionLookMix: LookMix = emptyLookMix();
 
   /**
-   * Three F3 lines for the "any mouse button held makes the mouse far too sensitive" report (BI-2).
-   *
-   * `free` and `held` are the same measurements taken in the two button states, and each ends in
-   * `rad/ct` — radians per unit of measured movement. `req` is look *offered* by the input stream, before
-   * the per-frame ceiling: comparing input-side gain is the point, and it keeps the ratio honest when the
-   * frame rate dips in one state (the ceiling would otherwise shrink one side and lie about the mouse).
-   * That ratio is the whole point: it is
-   * state-compared, so it needs no knowledge of how far the mouse physically travelled and nothing from
-   * an automated environment that cannot reproduce the bug. Wiggle the mouse the same way with and
-   * without a button held, then read the two numbers.
-   *
-   *   equal rad/ct, but held has far more counts  -> the *events* changed: OS pointer acceleration
-   *                                                  re-engaging for drags, or lock falling back
-   *   different rad/ct                            -> *our* maths changed between the two states
-   *   dupEvents > 0                               -> the same event arriving at the maths twice
-   *   lockChangesWhileHeld > 0                    -> pressing a button costs us pointer lock
+   * One F3 line stating which mouse we are on, because the two behave differently and the player may need
+   * to know which one they are looking at: if a report says "the mouse sped up while I held a button", the
+   * first question is whether the engine's pointer lock is holding. `drift` is cursor travel seen while the
+   * engine claimed the cursor was pinned — the evidence that made us give up on it.
    */
-  private describeLookProbe(): { lookFree: string; lookHeld: string; lookProbe: string } {
-    const st = this.input.lookStats;
-    const line = (
-      state: 'free' | 'held',
-      w: LookWindow,
-      ratio?: string,
-    ) =>
-      // The F3 key column already names the state, so the value does not repeat it (the line has to fit).
-      //
-      // `ct/ev` is the headline, not `rad/ct`: rad/ct comes out at LOOK_PER_PIXEL x sensitivity by
-      // construction, so it can only ever show that *our* maths is identical in both states — useful for
-      // ruling that out, useless for the other hypothesis. What changes when a browser swaps device
-      // counts for accelerated cursor travel is how much movement one event carries, so that is what each
-      // row leads with. `lk` is how many of those events arrived while the pointer was actually locked,
-      // and `drift` is cursor travel recorded while we believed it was pinned: a fake lock.
-      `${w.events} ev · ${Math.round(w.counts)} ct · ${(w.counts / Math.max(1, w.events)).toFixed(2)} ct/ev · ` +
-      `${w.rad.toFixed(1)} req · ${this.input.radPerCount(state).toFixed(5)} rad/ct · ` +
-      `lk ${w.eventsLocked}/${w.eventsUnlocked}` +
-      (w.driftEvents ? ` · drift ${w.driftEvents}ev ${Math.round(w.driftPx)}px` : '') +
-      ` · rej ${w.rejected}` +
-      // Events measured but thrown away because the world did not own the mouse. Worth a row of its own:
-      // "held has counts but no rad" is the fingerprint of losing capture mid-drag, and a row that only
-      // appears in the broken state is worse than no row — so it is appended only when it happens.
-      (w.discarded ? ` · no-capture ${w.discarded}` : '') +
-      (ratio ? ` · ${ratio}` : '');
-    const free = this.input.radPerCount('free');
-    const held = this.input.radPerCount('held');
-    const ratio = free > 0 && held > 0 ? (held / free).toFixed(2) + 'x' : undefined;
-    return {
-      lookFree: line('free', st.free),
-      lookHeld: line('held', st.held, ratio ? `ratio ${ratio}` : undefined),
-      lookProbe:
-        `mode ${this.input.lookMode} · drag×${this.input.dragComp.toFixed(2)} · dup ${st.dupEvents} · max ${st.maxPerFrame}/frame` +
-        ` · settle-drop ${st.settleDropped} · lock Δ${st.lockChanges} (${st.lockChangesWhileHeld} after press)` +
-        ` · regrab ${this.input.regrabAttempts} · frame-cap ${this.input.framesClamped}` +
-        ` · buttons ${st.buttons} · free median ${this.input.freeMedian().toFixed(0)} ct · F7 mode · F8 drag×`,
-    };
+  private describeLockState(): string {
+    const i = this.input;
+    const drift = i.lockDriftPx > 0 ? ` · drift ${Math.round(i.lockDriftPx)}px in ${i.lockDriftEvents} ev` : '';
+    if (i.pointerLockUnreliable)
+      return `pointer lock abandoned (unreliable in this browser) → cursor-hidden look${drift}`;
+    if (i.usingLock) return `pointer lock held${drift}`;
+    return `cursor-hidden look (${i.lockMouse ? 'lock unavailable or not granted yet' : 'off in settings'})${drift}`;
   }
 
   /** One F3 line that answers "where did that rotation come from?" — see Input.addLook(). */
@@ -577,7 +536,11 @@ export class Game implements EntityHost {
     const totals =
       `mouse ${this.input.movesSeen} moves · ${s.mouse.toFixed(1)} rad (${this.input.radPerMove().toFixed(2)}/move)` +
       ` · ${this.input.movesFromMovement} movement / ${this.input.movesFromClient} clientXY` +
-      ` · drag ${s.touchDrag.toFixed(1)} · pad ${s.gamepad.toFixed(1)} · ui ${s.ui.toFixed(1)} rad`;
+      ` · drag ${s.touchDrag.toFixed(1)} · pad ${s.gamepad.toFixed(1)} · ui ${s.ui.toFixed(1)} rad` +
+      // Only shown when it actually bites: a *pile* of ordinary deltas between two frames (a hitch, a
+      // backgrounded tab, an engine that queues input during a drag) is the other shape "the sensitivity
+      // jumped" can take, and a ceiling that hides a real bug should not be silent.
+      (this.input.framesClamped ? ` · clamped ${this.input.framesClamped} frames` : '');
     if (t < 1e-6) return `idle · ${totals}`;
     const parts = [`mouse ${m.mouse.toFixed(3)}`];
     if (m.touchDrag) parts.push(`touchDrag ${m.touchDrag.toFixed(3)}`);
@@ -1023,7 +986,7 @@ export class Game implements EntityHost {
       reach: this.target ? this.target.dist : null,
       targetBlock: this.target ? this.target.block : 0,
       look: this.describeLookMix(),
-      ...this.describeLookProbe(),
+      lock: this.describeLockState(),
       ready: this.readyProgress(),
       seed: this.seed,
       webgl2: info.webgl2,

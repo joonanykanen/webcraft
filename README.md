@@ -176,7 +176,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 221 vitest tests (14 files, ~11 s, Node environment)
+npm run test         # 217 vitest tests (14 files, ~11 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -212,7 +212,7 @@ new generation in chunks nobody touched).
 ### Browser smoke test
 
 ```
-npm run smoke     # vite preview + real Chrome (65 checks, ~3 min)
+npm run smoke     # vite preview + real Chrome (66 checks, ~3 min)
 npm run verify    # check + smoke
 ```
 
@@ -240,6 +240,11 @@ back with a visible cursor in menus → `Escape` releases the mouse and pauses i
 later, separate `Escape` pauses again rather than being swallowed) → the night curve has a real
 twilight band in the model **and** in the rendered pixels (sky luminance is read back with
 `readPixels` across a whole cycle and required to change by under 3 % of its range per second).
+
+The runner refuses to call a shrunken suite a pass: it fails if fewer than `MIN_CHECKS` checks ran. "N/N
+passed" on its own is silent about the checks that never executed, and a scripted edit in this repo's own
+history deleted four steps (F3 fps, mob geometry, walking, the sprint-jump input buffer) while everything
+that remained went green.
 
 **Always `npx vite build` before `npm run smoke`** — the suite serves `dist/`, so a stale build
 produces a cascade of misleading failures (one broken frame-counter reset once produced 17/36).
@@ -394,84 +399,6 @@ rejects a *pile* of ordinary ones, which is the other shape "sensitivity jumps w
 take — a hitch, a backgrounded tab, an engine that queues input while a button is down. Both discards are
 counted, so a clamp hiding a real bug is itself visible.
 
-### When a bug you can feel cannot be reproduced here: the look probe (BI-2)
-
-The report came in as "holding the mouse button makes the sensitivity skyrocket", then, more usefully: *"it
-doesn't matter which button — right, middle, even the browser back/forward buttons."* That detail rules out
-every action the game binds (nothing is bound to middle or back/forward), so the trigger is the raw press —
-and it leaves two families of cause, which need completely different fixes:
-
-1. **the deltas themselves get bigger** while a button is held — macOS re-applies pointer acceleration to a
-   button-held drag, or pointer lock quietly drops to the cursor-hidden path;
-2. **our maths apply them differently** — a listener attached twice, a second look source, or a ceiling that
-   happens to bite in only one of the two states.
-
-Neither can be observed from a headless browser: there is no real device, no OS acceleration curve, and
-synthetic events are untrusted. So instead of guessing, the build measures it in the hands where it happens.
-Three F3 rows, always available:
-
-```
-look  mouse 3741 moves · 121.0 rad (0.03/move) · 3738 movement / 3 clientXY · drag 0.0 rad
-  free  1204 ev · 6020 ct · 106.0 req · 0.01760 rad/ct · rej 0
-  held   388 ev · 1940 ct ·  34.2 req · 0.01760 rad/ct · rej 0 · ratio 1.00x
- probe mode session · drag×1.00 · dup 0 · max 12/frame · settle-drop 0 · lock Δ2 (0 after press) ·
-        buttons 0 · free median 5 ct · F7 mode · F8 drag×
-```
-
-`F9` clears the two counters so a comparison starts from nothing — on a key rather than a console call,
-because opening devtools takes the mouse away from the page, which is the thing being measured.
-
-Wiggle the mouse the same way with no button held, then with one held, and read `ratio`:
-
-The rows lead with `ct/ev` — how much movement one event carried — and `lk locked/unlocked`, how many of
-those events arrived while the pointer was genuinely locked. Both matter more than `rad/ct`, and the reason
-is a lesson about diagnostics: `rad/ct` is `LOOK_PER_PIXEL × sensitivity` *by construction*, so on its own it
-can only ever report that our own maths is symmetric. It cannot see the other hypothesis at all — a browser
-handing us accelerated cursor travel instead of device counts, which arrives with the same ratio and a much
-larger `ct`. An early version of this table led with `rad/ct`, and a real report came back looking like
-nothing was wrong.
-
-`drift` is the counter built for that case. Under a real pointer lock the cursor cannot move, so the page's
-own coordinates must sit still while device counts keep flowing; travel recorded while we believe the cursor
-is pinned means the browser granted the lock and let the pointer run anyway, and then the deltas are
-accelerated cursor travel. Reporting only a *sustained run* of it: browsers re-centre the cursor when the
-lock is granted, and a single large step is that, not a fake lock (the first version of this counted it as
-one, and the smoke run caught it crying wolf on exactly the measurement it exists to make).
-
-| reading | meaning |
-| --- | --- |
-| `ratio ≈ 1`, `held` has far more `ct` than `events` would suggest | the events themselves got bigger — OS/browser acceleration during drags. The fix is a compensation (`F8` proves it, `adaptive` fixes it) |
-| `ratio` well away from 1 | our own maths differ between the two states — look for a second consumer or a state-dependent clamp |
-| `dup` > 0 | the same event object reaching the maths twice (duplicated listeners) |
-| `no-capture N` on a row, or `lock Δn (m after press)` | pressing a button costs us pointer lock, so the exact-delta source is replaced mid-drag |
-| `settle-drop` large | look swallowed inside `LOCK_SETTLE_MS` of the lock being granted (dead mouse, not fast mouse) |
-
-`req` is look *offered* by the stream, before the per-frame ceiling: input-side gain is what the comparison
-is about, and using it keeps the ratio honest if the frame rate dips in one state only.
-
-Two dials, bound to keys so the experiment works without devtools (opening devtools drops the mouse, which
-pollutes the thing being measured): **`F7`** cycles how much the pipeline mediates the stream — `session`
-(the shipped behaviour) → `adaptive` (cap each event against recent *button-free* motion, which shaves an
-inflated drag delta back to the size an ordinary move of the same effort produces) → `raw` (no ceilings at
-all: if the spike survives `raw`, nothing we do to the numbers is responsible). **`F8`** multiplies look
-*only while a button is held* (1 → ×0.5 → ×0.34 → ×1.5): if a low value makes the spike disappear, the deltas
-themselves are the problem and the fix is a compensation rather than a clamp. **`F9`** zeroes the counters. Both announce themselves as a
-toast, and `probe mode` / `drag×` on F3 always show the current state, so a screenshot carries it.
-
-Alongside the measuring, two things now happen that can fix it without knowing which mechanism is at fault:
-the lock is requested with `unadjustedMovement` (raw device deltas where the browser offers them, so OS
-acceleration cannot ride along; browsers that reject the option fall back to the plain request), and a lock
-that vanishes within a moment of a button press is re-requested once, bounded to four attempts and standing
-down the moment the app pauses — Escape still unlocks, and a pause screen must keep its cursor. `regrab` and
-`frame-cap` on the probe row report both.
-
-For the console: `webcraft.lookStats(true)` returns the whole structure (and zeroes the windows for a clean
-A/B), `webcraft.setLookMode('adaptive')` and `webcraft.setDragComp(0.34)` set the dials directly.
-`scripts/probe-lookprobe.mjs` checks the instrument itself in a real browser under real pointer lock: it
-feeds equal known deltas in both button states and **requires `ratio` 1.00x** — an instrument that is
-asymmetric by construction would manufacture the very anomaly it is meant to measure, so that assertion is
-the baseline that makes every other reading trustworthy.
-
 One experiment in this area was wrong and is recorded as such: selecting the measurement source by capture
 state ("locked means `movement`, free means `client`") was tried, and three existing tests failed
 immediately — it throws away the exact measurement in the cursor-hidden fallback and makes the gain depend
@@ -490,8 +417,7 @@ asymmetric tiles land the right way up on block faces), `probe-slots.mjs` (every
 bounding box, at several viewport sizes and in both engines — the shape a "ghost item outside its slot"
 report would leave behind), `probe-goals.mjs` (the next-goal card's
 fade/return/pin cycle), `probe-polish.mjs` (full-screen HUD, punch, unlock toast, pause) and
-`probe-lookprobe.mjs` (checks the button-split look
-instrument under real pointer lock, and the `F7`/`F8` dials), `probe-lookgain.mjs`, which dispatches synthetic pointer+mouse events with *known* pixel deltas and
+`probe-lookgain.mjs`, which dispatches synthetic pointer+mouse events with *known* pixel deltas and
 prints radians-per-pixel for every combination of pointer lock, free cursor, touch controls and
 left-button-held — the matrix that found the sensitivity bug below. Run them after `npx vite build`
 and open the images.
@@ -526,6 +452,30 @@ Three things had to be true before locking could be the default, and all three a
 * **A refusal is not fatal.** `requestPointerLock()` can reject (wrong document state, a locked-down
   embedder). The promise is caught, `pointerlockerror` is handled, and a 400 ms watchdog drops to the
   cursor-hidden path, so the worst case is a playable game with a slightly different feel.
+
+* **A lock that is not really holding is abandoned.** On macOS a pointer lock is implemented by hiding the
+  cursor and pinning it. In some engines a button-held drag hands the mouse stream to the browser's own drag
+  machinery, where that pinning and the raw-delta substitution stop applying — and the page is never told,
+  because `pointerlockchange` stays quiet and `pointerLockElement` stays set. `movementX` becomes cursor
+  travel with the OS's acceleration curve on it, accumulating, because nothing is recentring any more. That is
+  the report *"it doesn't matter what mouse button I press — RMB, MMB, whatever, even MOUSE4 and 5 — holding it
+  down makes the sensitivity skyrocket"*, and it explains why the buttons' bindings were irrelevant: the
+  trigger is the press, not the action. It also explains why nothing the game did to the numbers helped — **the
+  numbers are the lie, and no ceiling applied to a lie feels right.** So `Input` watches for the one thing that
+  cannot happen under a real lock: the page's own coordinates advancing while the cursor is supposedly pinned.
+  A *sustained run* of it (6 consecutive events) means the cursor is running; one large step does not, because
+  browsers re-centre the cursor when the lock is granted, modals shift the page's coordinates, and a refocus
+  hands the pointer back. On that verdict the game exits pointer lock, **stays in the world instead of pausing**
+  (this is our correction, not the player's `Escape`), carries on with the cursor-hidden path, and does not ask
+  for the lock again that session — while the setting is written off and a one-time toast says why, because a
+  control feel that changes silently is a bug of its own. Turning *Lock mouse while playing* back on is allowed
+  and re-arms the detection. The press also `preventDefault()`s now so the browser's drag/selection session —
+  the reroute that starts the whole thing — never begins, and `#viewport` sets `-webkit-user-drag: none` for the
+  same reason. Detection rather than user-agent sniffing, because it is a behaviour and not a version: Safari
+  shows this, Chrome does not, and an engine that gets fixed in an update should stop degrading on its own.
+  Smoke drives it deliberately (`a pointer lock that lets the cursor move is abandoned…`), since CI Chrome is
+  not Safari: claim the lock, make the cursor run, then require that the lock is dropped, the world keeps
+  playing, no pause happens, no further lock is requested, and F3 says which path is live.
 
 While the world owns the cursor, `body.mouse-captured` hides it; on `window.blur` or `mouseleave`
 `Input` clears every held key and stops actions, which is also what fixes the classic *"my player is

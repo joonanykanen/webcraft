@@ -18,83 +18,6 @@ export type KeyHandler = (code: string, evt: KeyboardEvent) => void;
 export type LookSource = 'mouse' | 'touchDrag' | 'gamepad' | 'ui';
 export type LookMix = Record<LookSource, number>;
 
-/** How much the look pipeline mediates the incoming stream — see `Input.lookMode`. */
-export type LookMode = 'session' | 'adaptive' | 'raw';
-
-/** Look totals for one button state (nothing held / some button held). */
-export interface LookWindow {
-  /** mousemove events measured in this state */
-  events: number;
-  /** movement counts (or client px, when the event carried none) summed in this state */
-  counts: number;
-  /** radians actually handed to the camera in this state */
-  rad: number;
-  /** events trimmed by the ceiling, or dropped while pointer lock settled */
-  rejected: number;
-  /**
-   * Events measured but NOT handed to the camera, because the world did not own the mouse at that
-   * moment. Counted on purpose: "held shows 40 events and 200 counts but 0 rad" is the fingerprint of
-   * losing capture while a button is down — one of the hypotheses for the spike — and an instrument that
-   * recorded nothing in that state would make the bug look absent.
-   */
-  discarded: number;
-  /** events that arrived while we genuinely held pointer lock, vs while we did not */
-  eventsLocked: number;
-  eventsUnlocked: number;
-  /**
-   * *Fake-lock* detector — the counter that matters most now.
-   *
-   * Under a real pointer lock the cursor cannot move, so `clientX/clientY` must sit still while
-   * `movementX/Y` keeps flowing. If the page's own coordinates drift while we believe we are locked, the
-   * browser is granting the lock but letting the cursor run — and then `movementX` is really accelerated
-   * cursor travel, which is exactly "the mouse becomes far too sensitive", and no amount of clamping on
-   * our side makes it feel right. Recorded per button state, because the report is about button-held
-   * drags.
-   */
-  driftEvents: number;
-  driftPx: number;
-}
-
-export interface LookStats {
-  free: LookWindow;
-  held: LookWindow;
-  /** events seen twice (same timeStamp and payload) — the fingerprint of a duplicated listener */
-  dupEvents: number;
-  /** most mousemove events observed between two consumeLook() calls (input coalescing) */
-  maxPerFrame: number;
-  /** events swallowed because they arrived inside LOCK_SETTLE_MS of the lock being granted */
-  settleDropped: number;
-  /** pointerlockchange/pointerlockerror transitions, and how many landed just after a button press */
-  lockChanges: number;
-  lockChangesWhileHeld: number;
-  /** the `buttons` bitmask of the most recent mousemove */
-  buttons: number;
-}
-
-const emptyWindow = (): LookWindow => ({
-  events: 0,
-  counts: 0,
-  rad: 0,
-  rejected: 0,
-  discarded: 0,
-  eventsLocked: 0,
-  eventsUnlocked: 0,
-  driftEvents: 0,
-  driftPx: 0,
-});
-
-export function newLookStats(): LookStats {
-  return {
-    free: emptyWindow(),
-    held: emptyWindow(),
-    dupEvents: 0,
-    maxPerFrame: 0,
-    settleDropped: 0,
-    lockChanges: 0,
-    lockChangesWhileHeld: 0,
-    buttons: 0,
-  };
-}
 export const emptyLookMix = (): LookMix => ({ mouse: 0, touchDrag: 0, gamepad: 0, ui: 0 });
 
 const GAME_KEYS = new Set([
@@ -205,26 +128,30 @@ export class Input {
    * measurement of the physical mouse, and needs nothing from a test environment that cannot reproduce
    * the bug — just wiggle the mouse the same way with and without a button held, and read the F3 lines.
    */
-  lookStats: LookStats = newLookStats();
   /**
-   * 'session': today's behaviour, fixed ceilings (MAX_LOOK_PER_EVENT per event).
-   * 'adaptive': cap against recent button-free motion — if an OS inflates drag deltas, this shaves
-   *           them back to the size a free move of the same effort produces.
-   * 'raw':    no ceilings at all. A diagnostic, not a mode: if the spike survives 'raw', nothing we do
-   *           to the numbers is responsible for it.
+   * Set once this browser has proved it cannot hold the cursor still while it claims to own the mouse.
+   *
+   * Pointer lock is implemented on macOS by hiding the cursor and pinning it, and in some engines that
+   * emulation stops working the moment a button is held: the AppKit event stream switches from mouse-move
+   * to drag routing, the pinning and the raw-delta substitution stop applying, and the page is never told
+   * — `pointerlockchange` stays quiet, `pointerLockElement` stays set, and `movementX` becomes cursor
+   * travel with the OS acceleration curve on it, accumulating without bound because nothing is recentring
+   * any more. That is the whole reported symptom — the mouse goes wild while *any* button is down, any
+   * button at all, because the trigger is the button state, not what the game has bound to it — and no
+   * ceiling we apply to the numbers makes it feel right, because the input it is ceilinging is a lie.
+   *
+   * So when we see it we stop using the lock: the cursor-hidden path takes over (which is honest about
+   * what it is), and we do not ask for the lock again this session. Detected at runtime rather than
+   * sniffed from a user-agent string, since it is a behaviour and not a version.
    */
-  lookMode: LookMode = 'session';
-  /** Multiplier on look deltas while a button is held; 1 = off. The one-line test for hypothesis (a):
-   * if 0.34 makes the spike go away, the deltas themselves are the problem and the fix is a
-   * compensation, not a clamp. */
-  dragComp = 1;
-  private freeMag: number[] = [];
-  /** Consecutive events that carried cursor travel while we believed the pointer was pinned. */
+  pointerLockUnreliable = false;
+  /** Cursor travel seen while the browser claimed it had the cursor pinned. Feeds the flag above. */
+  lockDriftPx = 0;
+  lockDriftEvents = 0;
+  /** Fires once, when the lock is given up on. The app explains it and remembers the preference. */
+  onLookDegraded: (() => void) | null = null;
+  /** Consecutive events that carried cursor travel under a claimed lock; a run, not one step. */
   private driftRun = 0;
-  private seenEvents = new WeakSet<object>();
-  private pressTimes: number[] = [0, 0, 0, 0, 0];
-  private lastPressAt = -1e12;
-  private eventsThisFrame = 0;
   /** True while we hand the cursor back on purpose (a panel opened) — the app must not pause. */
   expectUnlock = false;
   /** Timestamp of the last Space press so a tap shorter than one tick still jumps. */
@@ -262,8 +189,9 @@ export class Input {
   private hasLast = false;
   /** When the lock was granted; movement right after it is the browser re-centring the cursor. */
   private lockSettledAt = -1e9;
-  /** Prefer Pointer Lock (unbounded look, no second-monitor escape). Falls back automatically. */
-  private lockMouse = true;
+  /** Prefer Pointer Lock (unbounded look, no second-monitor escape). Falls back automatically. Public
+   * because the F3 line reports which of the two mouse paths the player is actually on. */
+  lockMouse = true;
   private gamepadButtons: boolean[] = [];
   private gamepadAxes = [0, 0, 0, 0];
   private gamepadConnected = false;
@@ -274,6 +202,7 @@ export class Input {
     window.addEventListener('keyup', this.keyUp);
     window.addEventListener('blur', this.blur);
     canvas.addEventListener('mousedown', this.mouseDown);
+    canvas.addEventListener('dragstart', this.dragStart);
     window.addEventListener('mouseup', this.mouseUp);
     window.addEventListener('mousemove', this.mouseMove);
     document.addEventListener('pointerlockchange', this.lockChanged);
@@ -296,6 +225,7 @@ export class Input {
     window.removeEventListener('keyup', this.keyUp);
     window.removeEventListener('blur', this.blur);
     this.canvas?.removeEventListener('mousedown', this.mouseDown);
+    this.canvas?.removeEventListener('dragstart', this.dragStart);
     window.removeEventListener('mouseup', this.mouseUp);
     window.removeEventListener('mousemove', this.mouseMove);
     document.removeEventListener('pointerlockchange', this.lockChanged);
@@ -309,6 +239,10 @@ export class Input {
   }
 
   private contextMenu = (e: Event) => e.preventDefault();
+
+  /** Dragging the canvas out (a button-held drag is exactly what starts one) would hand the browser a
+   * drag session in place of our mouse stream, same as a text selection would. */
+  private dragStart = (e: Event) => e.preventDefault();
 
   private keyDown = (e: KeyboardEvent) => {
     this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
@@ -356,15 +290,18 @@ export class Input {
   };
 
   private mouseDown = (e: MouseEvent) => {
+    // Take the button's default action away from the browser. A press otherwise starts the engine's own
+    // text-selection / element-drag session, and in WebKit that session reroutes the mouse stream to drag
+    // handling — the same event-routing change that quietly breaks the pointer-lock cursor pinning
+    // described on `pointerLockUnreliable`. Chrome is unaffected either way, so this costs nothing there
+    // and may be the whole story in Safari.
+    e.preventDefault();
     if (!this.active) return;
-    this.pressTimes[e.button] = (this.pressTimes[e.button] ?? 0) + 1;
-    this.lastPressAt = performance.now();
-    // The action starts even when the cursor is still visible: the click that captures the mouse
-    // must also swing the arm, otherwise the very first hit "does nothing".
     if (e.button === 0) this.mining = true;
     if (e.button === 2) this.placing = true;
-    if (e.button === 1) this.onKeyDown?.('MouseMiddle', e as unknown as KeyboardEvent);
-    if (!this.locked) this.capture();
+    // Middle click and the browser back/forward buttons: deliberately ignored. Worth stating because
+    // "the look goes wild on *any* button" was reported, and those buttons drive nothing here — which is
+    // what pointed at the press itself rather than at an action.
   };
 
   private mouseUp = (e: MouseEvent) => {
@@ -374,207 +311,105 @@ export class Input {
 
   private mouseMove = (e: MouseEvent) => {
     this.capsSprint = e.getModifierState?.('CapsLock') ?? this.capsSprint;
-    // NOTE: there used to be an early "the world does not own the mouse" return here. It is after the
-    // button-split accounting now, because an instrument that records nothing while capture is missing
-    // cannot distinguish "no events arrived" from "events arrived and were thrown away" — and the second
-    // one is a candidate explanation for the button-held spike.
-    // movementX/Y is exact; clientX deltas are the fallback (and let tests drive the camera).
-    // Some engines report `undefined`/NaN on the first event after a focus change — feeding that
-    // into the yaw would make every coordinate NaN (= unplayable world), so sanitise first.
-    // ONE measurement source per capture state — this used to switch sources *between events*, and that
-    // is how "the mouse gets much more sensitive while the button is held" happens on engines where the
-    // two disagree. They are different quantities:
-    //   • `movementX/Y` — device counts. Under pointer lock the cursor cannot move, so this is the only
-    //     source there is (and with `unadjustedMovement` it is deliberately *not* screen pixels).
-    //   • `clientX/Y` deltas — the pointer's travel across the page, in CSS px, with the OS's own
-    //     pointer acceleration applied. The only source available when the mouse is merely hidden.
-    // Rule: movement deltas are the measurement, `clientX/Y` is a fallback for events that carry none
-    // (some engines leave movementX at 0 during a button-held drag, and Safari is unreliable about it).
-    // Picking by capture state instead — "locked means movement, free means client" — was tried and is
-    // wrong: it throws away the exact measurement in the cursor-hidden fallback, and it makes the look
-    // gain depend on what the engine happens to fill in. The per-event and per-frame caps below, plus the
-    // source counters, are what actually keep the reported sensitivity spikes from reaching the camera.
-    const rawX = Number.isFinite(e.movementX) ? e.movementX : 0;
-    const rawY = Number.isFinite(e.movementY) ? e.movementY : 0;
-    // Some engines report `undefined`/NaN on the first event after a focus change — feeding that into
-    // the yaw would make every coordinate NaN (= unplayable world), so sanitise before using it.
-    let dx = 0;
-    let dy = 0;
-    let usedClient = false;
-    if (rawX !== 0 || rawY !== 0) {
-      dx = rawX;
-      dy = rawY;
-    } else if (this.hasLast) {
-      dx = e.clientX - this.lastX;
-      dy = e.clientY - this.lastY;
-      usedClient = true;
-      // A jump this big is the cursor teleporting (focus change, another monitor, a drag handed over
-      // from outside the window), not a swing of the wrist. Believing it is what used to feel like
-      // "the sensitivity rises on its own".
-      if (Math.abs(dx) > MAX_CLIENT_JUMP || Math.abs(dy) > MAX_CLIENT_JUMP) {
-        dx = 0;
-        dy = 0;
-      }
-    }
-    const buttons = typeof e.buttons === 'number' ? e.buttons : 0;
-    const win = buttons === 0 ? this.lookStats.free : this.lookStats.held;
-    this.lookStats.buttons = buttons;
-    // A handler that runs twice for one event feels exactly like a mouse that is twice as sensitive, and
-    // nothing else here would show it. Keyed on the event *object*, not its contents: two real events can
-    // legitimately carry identical deltas in the same millisecond, while the same object reaching this
-    // handler twice can only mean the listener is attached twice.
-    if (this.seenEvents.has(e)) this.lookStats.dupEvents++;
-    else this.seenEvents.add(e);
+    // Snapshot first: the drift check below updates the record, and the `clientX/Y` fallback still needs
+    // the position this event is measured *against*.
+    const prevX = this.lastX;
+    const prevY = this.lastY;
+    const hadLast = this.hasLast;
+    const travel = hadLast ? Math.abs(e.clientX - prevX) + Math.abs(e.clientY - prevY) : 0;
+    this.lastX = e.clientX;
+    this.lastY = e.clientY;
+    this.hasLast = true;
 
-    const travel = this.hasLast ? Math.abs(e.clientX - this.lastX) + Math.abs(e.clientY - this.lastY) : 0;
+    // Under a real pointer lock the cursor cannot move, so the page's own coordinates must sit still while
+    // device counts keep flowing. A *sustained* run of travel therefore means the engine is letting the
+    // cursor run while it tells us the mouse is ours — and then `movementX` is accelerated cursor travel,
+    // not device counts. One step is not enough to conclude that: browsers re-centre the cursor when the
+    // lock is granted, a modal can shift the page's coordinates, and a refocus hands the pointer back.
     if (this.usingLock && performance.now() - this.lockSettledAt > LOCK_SETTLE_MS) {
-      // A *sustained* run of travel is what a fake lock looks like. One jump is not: browsers re-centre the
-      // cursor when the lock is granted, a modal can change the page's coordinates, and a refocus hands the
-      // pointer back — all of which arrive as a single large step. Counting those as drift would make this
-      // detector cry wolf on the exact measurement it exists to make.
       if (travel > LOCK_DRIFT_PX) {
         this.driftRun++;
-        if (this.driftRun >= 3) {
-          win.driftEvents++;
-          win.driftPx += travel;
-        }
+        this.lockDriftEvents++;
+        this.lockDriftPx += travel;
+        // Six consecutive events of travel is not a re-centre and not a slow frame; it is the cursor
+        // running. Keep playing, but never trust this lock again (see `pointerLockUnreliable`).
+        if (this.driftRun >= 6 && !this.pointerLockUnreliable) this.degradeFromPointerLock();
       } else {
         this.driftRun = 0;
       }
     } else {
       this.driftRun = 0;
     }
-    if (this.usingLock) win.eventsLocked++;
-    else win.eventsUnlocked++;
 
-    this.lastX = e.clientX;
-    this.lastY = e.clientY;
-    this.hasLast = true;
-    this.movesSeen++;
-    this.eventsThisFrame++;
-    if (this.eventsThisFrame > this.lookStats.maxPerFrame) this.lookStats.maxPerFrame = this.eventsThisFrame;
-    if (usedClient) this.movesFromClient++;
-    else this.movesFromMovement++;
-
-    const counts = Math.abs(dx) + Math.abs(dy);
-    win.events++;
-    win.counts += counts;
     if (!this.locked || !this.active) {
-      // Measured, not used. Clearing `hasLast` when the world is inactive keeps the next event's
-      // client-delta fallback from spanning a long gap.
-      win.discarded++;
-      if (!this.active) this.hasLast = false;
+      this.hasLast = false;
       return;
     }
-    // Reference for 'adaptive': how big are ordinary, button-free movement deltas? Only events that
-    // actually drove the camera count as evidence about what the player sees.
-    if (buttons === 0 && !usedClient && counts > 0) {
-      this.freeMag.push(counts);
-      if (this.freeMag.length > 64) this.freeMag.shift();
+    // movementX/Y is exact; clientX deltas are the fallback (and let tests drive the camera).
+    // ONE measurement source per capture state — switching sources *between events* is how "the mouse gets
+    // much more sensitive while the button is held" happens on engines where the two disagree. They are
+    // different quantities: `movementX/Y` is device counts (under a working lock, deliberately not screen
+    // pixels), `clientX/Y` deltas are the pointer's travel across the page in CSS px with the OS's own
+    // acceleration on them. Rule: movement deltas are the measurement, `clientX/Y` fills in for events that
+    // carry none (some engines leave movementX at 0 during a button-held drag). Picking by capture state was
+    // tried and is wrong: it throws away the exact measurement in the fallback and makes the look gain
+    // depend on what the engine happens to fill in.
+    const rawX = Number.isFinite(e.movementX) ? e.movementX : 0;
+    const rawY = Number.isFinite(e.movementY) ? e.movementY : 0;
+    // Some engines report `undefined`/NaN on the first event after a focus change — feeding that into the
+    // yaw would make every coordinate NaN (= unplayable world), so sanitise before using it.
+    let dx = 0;
+    let dy = 0;
+    if (rawX !== 0 || rawY !== 0) {
+      dx = rawX;
+      dy = rawY;
+      this.movesFromMovement++;
+    } else if (hadLast) {
+      dx = e.clientX - prevX;
+      dy = e.clientY - prevY;
+      this.movesFromClient++;
+      // A jump this big is the cursor teleporting (focus change, another monitor, a drag handed over from
+      // outside the window), not a swing of the wrist. Believing it is what used to feel like "the
+      // sensitivity rises on its own".
+      if (Math.abs(dx) > MAX_CLIENT_JUMP || Math.abs(dy) > MAX_CLIENT_JUMP) {
+        dx = 0;
+        dy = 0;
+      }
     }
+    this.movesSeen++;
 
     // Pointer lock re-centres the cursor on grant; that warp arrives as one enormous delta.
-    if (this.usingLock && performance.now() - this.lockSettledAt < LOCK_SETTLE_MS) {
-      win.rejected++;
-      this.lookStats.settleDropped++;
-      return;
-    }
+    if (this.usingLock && performance.now() - this.lockSettledAt < LOCK_SETTLE_MS) return;
+
     // One gigantic delta (refocussed tab, a drag resumed far away) must never spin the camera.
     const step = LOOK_PER_PIXEL * this.sensitivity;
-    const cap = this.lookCap();
-    const drag = buttons === 0 ? 1 : this.dragComp;
-    const lx = this.capStep(dx * step * drag, cap, win);
-    const ly = this.capStep(dy * step * drag, cap, win) * (this.invertY ? -1 : 1);
-    win.rad += Math.abs(lx) + Math.abs(ly);
+    const lx = clampStep(dx * step);
+    const ly = clampStep(dy * step) * (this.invertY ? -1 : 1);
     this.sessionLookFromMouse += Math.abs(lx) + Math.abs(ly);
     this.addLook(lx, ly, 'mouse');
   };
 
-  /** Radians allowed per event in the current look mode (see `lookMode`). */
-  private lookCap(): number {
-    if (this.lookMode === 'raw') return Infinity;
-    if (this.lookMode === 'adaptive') {
-      const ref = this.freeMedian() * this.sensitivity * LOOK_PER_PIXEL;
-      // Four times the largest ordinary free movement, never below something a slow glance needs,
-      // never above the ceiling the game has always used. Ordinary flicks are untouched; a delta that
-      // is 6x the biggest free move of comparable effort gets shaved back.
-      if (ref <= 0) return MAX_LOOK_PER_EVENT;
-      return Math.min(MAX_LOOK_PER_EVENT, Math.max(0.05, ref * 4));
-    }
-    return MAX_LOOK_PER_EVENT;
-  }
-
-  private capStep(v: number, cap: number, win: LookWindow): number {
-    if (!Number.isFinite(v)) return 0; // NaN into the yaw = an unplayable world
-    const a = Math.abs(v);
-    if (a > cap) {
-      win.rejected++;
-      return Math.sign(v) * cap;
-    }
-    return v;
-  }
-
-  /** Median |counts| of the most recent button-free events (0 when none seen yet). */
-  freeMedian(): number {
-    if (this.freeMag.length === 0) return 0;
-    const sorted = [...this.freeMag].sort((a, b) => a - b);
-    return sorted[sorted.length >> 1];
-  }
-
-  /** Radians applied per unit of measured movement, for one state. Compare free vs held on F3. */
-  radPerCount(state: 'free' | 'held'): number {
-    const w = state === 'free' ? this.lookStats.free : this.lookStats.held;
-    return w.counts > 0 ? w.rad / w.counts : 0;
-  }
-
-  /** Start the experiment again from zero (so a state comparison is not polluted by history). */
-  resetLookStats(): void {
-    this.lookStats = newLookStats();
-    this.freeMag = [];
-    this.seenEvents = new WeakSet<object>();
-    this.eventsThisFrame = 0;
-  }
-
   /**
-   * Re-request the mouse after losing it, but only in the narrow case that explains this bug: the lock
-   * vanished within a moment of a button press while the world was still playing. That is what a browser
-   * doing native drag/selection on mousedown looks like, and staying on the cursor-hidden path for the
-   * rest of a drag is how a press ends up making the mouse feel wild. Bounded, so it can never fight the
-   * user: Escape deliberately unlocks (pause opens, `active` goes false) and is not chased.
+   * Give up on Pointer Lock for the rest of the session, without leaving the game.
+   *
+   * Called after watching the cursor travel while the engine claimed it was pinned. Exiting the lock fires
+   * `pointerlockchange`, and the app pauses on losing the mouse — right when the user presses Escape, wrong
+   * when this is our own correction. `setCaptured(..., silent)` plus the `pointerLockUnreliable` guard in
+   * `lockChanged` keep the world running on the cursor-hidden path, where the browser is at least honest
+   * about which numbers it is handing us.
    */
-  regrabAttempts = 0;
-  private regrabTimer: ReturnType<typeof setTimeout> | null = null;
-  private maybeRegrab(): void {
-    if (typeof document === 'undefined' || !this.canvas || !this.active) return;
-    if (this.locked || document.pointerLockElement) return;
-    if (performance.now() - this.lastPressAt > 600) return;
-    if (this.regrabAttempts >= 4) return;
-    this.regrabAttempts++;
-    if (this.regrabTimer) clearTimeout(this.regrabTimer);
-    this.regrabTimer = setTimeout(() => {
-      this.regrabTimer = null;
-      if (!this.active || this.locked || !this.canvas) return;
+  private degradeFromPointerLock(): void {
+    this.pointerLockUnreliable = true;
+    this.usingLock = false;
+    if (typeof document !== 'undefined') {
       try {
-        const req = this.canvas.requestPointerLock({ unadjustedMovement: true }) as unknown as
-          | Promise<void>
-          | undefined;
-        if (req && typeof req.catch === 'function') req.catch(() => this.canvas?.requestPointerLock());
+        document.exitPointerLock();
       } catch {
-        try {
-          this.canvas.requestPointerLock();
-        } catch {
-          /* stay on the fallback; the watchdog will keep the mouse usable */
-        }
+        /* already not ours */
       }
-    }, 120);
-  }
-
-  /** Press counts per mouse button index, and how often losing the mouse happened mid-drag. */
-  pressCount(button: number): number {
-    return this.pressTimes[button] ?? 0;
-  }
-  lastPressElapsed(): number {
-    return performance.now() - this.lastPressAt;
+    }
+    this.setCaptured(true, true); // stay in the game; the player did not ask for their mouse back
+    this.onLookDegraded?.();
   }
 
   private wheelHandler = (e: WheelEvent) => {
@@ -602,6 +437,12 @@ export class Input {
    */
   requestLock(): void {
     if (typeof document === 'undefined' || !this.canvas) return;
+    if (this.pointerLockUnreliable) {
+      // We already watched this engine lose control of the cursor mid-drag. Take the fallback quietly:
+      // requesting the lock again would walk straight back into the bug the player reported.
+      this.setCaptured(true, false);
+      return;
+    }
     if (document.pointerLockElement === this.canvas) {
       this.lockChanged();
       return;
@@ -630,11 +471,12 @@ export class Input {
 
   private lockChanged = (): void => {
     const owned = typeof document !== 'undefined' && document.pointerLockElement === this.canvas;
-    this.lookStats.lockChanges++;
-    // A lock change within a blink of a button press is the signature of "press the button, lose the
-    // exact-delta source, carry on with the accelerated one" — hypothesis (a)'s other form.
-    if (performance.now() - this.lastPressAt < 400) this.lookStats.lockChangesWhileHeld++;
     this.usingLock = owned;
+    if (!owned && this.pointerLockUnreliable) {
+      // Our own exit, from degradeFromPointerLock(). Stay captured: the player did nothing.
+      this.setCaptured(true, true);
+      return;
+    }
     if (owned) {
       this.lockSettledAt = performance.now();
       this.setCaptured(true, false);
@@ -642,10 +484,6 @@ export class Input {
       // The browser took the cursor back: Escape, an OS switch, a dialog, a drag out of the window.
       // `setCaptured` notifies the app, which is what makes one Escape press pause the game.
       this.setCaptured(false, false);
-      // Last on purpose: if the app chose to pause, `active` is false by now and this does nothing. It
-      // only fires for a blip the app did not treat as a reason to pause, which is the case that would
-      // otherwise leave the rest of the drag on the accelerated cursor path.
-      this.maybeRegrab();
     }
   };
 
@@ -679,6 +517,12 @@ export class Input {
   }
 
   setLockMouse(on: boolean): void {
+    // Turning it back on is the player's call (Settings, or an engine that behaves after an update):
+    // clear the verdict and let the same detection re-earn it.
+    if (on) {
+      this.pointerLockUnreliable = false;
+      this.driftRun = 0;
+    }
     if (this.lockMouse === on) return;
     this.lockMouse = on;
     if (!this.active) return;
@@ -725,6 +569,15 @@ export class Input {
     this.keyUp(e);
   }
 
+  /** Same, for the button presses — the default action is part of the contract with the browser. */
+  handleMouseDown(e: MouseEvent): void {
+    this.mouseDown(e);
+  }
+
+  handleMouseUp(e: MouseEvent): void {
+    this.mouseUp(e);
+  }
+
   handleMouseMove(e: MouseEvent): void {
     this.mouseMove(e);
   }
@@ -758,9 +611,7 @@ export class Input {
     // The single funnel every consumer reads from, so this is also the only place a frame-level ceiling
     // can be enforced. Both axes are capped against the same budget: a diagonal sweep carries the
     // larger magnitude and must not slip a rotation through that the frame could not show.
-    // 'raw' is the diagnostic mode: nothing mediated, so the ceiling is off as well. F3 says which mode
-    // is active, so a reader of these numbers always knows whether they are looking at raw input.
-    const magnitude = this.lookMode === 'raw' ? 0 : Math.hypot(this.lookDX, this.lookDY);
+    const magnitude = Math.hypot(this.lookDX, this.lookDY);
     if (magnitude > MAX_LOOK_PER_FRAME) {
       const scale = MAX_LOOK_PER_FRAME / magnitude;
       this.lookDX *= scale;
@@ -771,7 +622,6 @@ export class Input {
     this.lookDX = 0;
     this.lookDY = 0;
     this.lookBySource = emptyLookMix();
-    this.eventsThisFrame = 0;
     return out;
   }
 

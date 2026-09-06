@@ -338,152 +338,141 @@ describe('movement snapshot (PH-2 sprint, PH-3 jump)', () => {
 });
 
 /**
- * The "any mouse button held makes the mouse far too sensitive" report (BI-2). That cannot be reproduced
- * in a headless browser, so what is tested here is the *instrument* that measures it in the player's own
- * hands: the button-split accounting, the duplicated-event detector, and the two dials (F7 look mode,
- * F8 held-drag multiplier) that turn a report into an experiment. If those work, the two F3 lines
- * (`free` / `held`) are trustworthy, and their `rad/ct` figures say whether the deltas changed or our
- * maths changed — without needing a machine that can feel the bug.
+ * The Safari report: the mouse goes wild while *any* button is held — right, middle, even the browser
+ * back/forward buttons — and is normal the instant the button comes up. Chrome never shows it.
+ *
+ * The cause is not in this file's look maths; it is the engine's own pointer-lock emulation giving up
+ * during a button-held drag. On macOS a lock is implemented by hiding the cursor and pinning it, and a
+ * press can hand the mouse stream over to the engine's drag machinery, where the pinning and the
+ * raw-delta substitution stop applying. The page is never told: `pointerlockchange` stays quiet,
+ * `pointerLockElement` stays set, and `movementX` becomes cursor travel with the OS's acceleration curve
+ * on it — accumulating, because nothing is recentring any more. That is what makes it a skyrocket rather
+ * than a percentage, why any button does it, and why no ceiling applied to the numbers can help: the
+ * numbers are the lie.
+ *
+ * So the game detects the one observable consequence — the cursor moving while we are told it is pinned —
+ * and stops using the lock, keeping the player in the world rather than pausing them out of it.
  */
-describe('button-held look probe (BI-2)', () => {
-  const move = (opts: {
-    mx?: number;
-    my?: number;
-    cx?: number;
-    cy?: number;
-    buttons?: number;
-    t?: number;
-  }) =>
+describe('a pointer lock that is not really holding (BI-2)', () => {
+  const move = (o: { mx?: number; my?: number; cx?: number; cy?: number; buttons?: number; t?: number }) =>
     ({
-      movementX: opts.mx ?? 0,
-      movementY: opts.my ?? 0,
-      clientX: opts.cx ?? 100,
-      clientY: opts.cy ?? 100,
-      buttons: opts.buttons ?? 0,
-      timeStamp: opts.t ?? 1000,
+      movementX: o.mx ?? 0,
+      movementY: o.my ?? 0,
+      clientX: o.cx ?? 400,
+      clientY: o.cy ?? 300,
+      buttons: o.buttons ?? 0,
+      timeStamp: o.t ?? 1000,
       getModifierState: () => false,
     }) as unknown as MouseEvent;
 
-  const captured = () => {
+  /**
+   * Under a working lock: the world owns the mouse, device counts flow, and the cursor is pinned. There is
+   * no document in Node, so `capture()` takes the cursor-hidden path — which sets the same `locked` flag the
+   * locked path would, and `usingLock` is set by hand to describe the state under test.
+   */
+  const lockedInput = () => {
     const input = new Input();
     input.setActive(true);
     input.capture();
+    input.usingLock = true;
     return input;
   };
 
-  it('is symmetric: identical input gives identical rad/ct held or free', () => {
-    // The instrument's own baseline. If this ever fails, the harness is lying and its numbers must not
-    // be used to judge anything.
-    const input = captured();
-    for (let i = 0; i < 5; i++) input.handleMouseMove(move({ mx: 4, my: 0, t: 100 + i }));
-    for (let i = 0; i < 5; i++) input.handleMouseMove(move({ mx: 4, my: 0, buttons: 1, t: 200 + i }));
-    expect(input.radPerCount('free')).toBeCloseTo(input.radPerCount('held'), 12);
-    expect(input.lookStats.free.events).toBe(5);
-    expect(input.lookStats.held.events).toBe(5);
-    expect(input.lookStats.free.counts).toBe(20);
-    expect(input.lookStats.held.counts).toBe(20);
+  it('looks around normally while the cursor stays pinned', () => {
+    const input = lockedInput();
+    for (let i = 0; i < 20; i++) input.handleMouseMove(move({ mx: 8, my: 0, t: 100 + i }));
+    expect(input.pointerLockUnreliable).toBe(false);
+    expect(input.lockDriftEvents).toBe(0);
+    expect(input.movesSeen).toBe(20);
+    expect(input.consumeLook().dx).toBeGreaterThan(0);
   });
 
-  it('counts the same event arriving twice, which is what duplicated listeners look like', () => {
-    const input = captured();
-    const evt = move({ mx: 6, my: 2, t: 555 });
-    input.handleMouseMove(evt);
-    input.handleMouseMove(evt); // a second listener attached to the same event
-    expect(input.lookStats.dupEvents).toBe(1);
-    input.handleMouseMove(move({ mx: 6, my: 2, t: 556 })); // new timeStamp = a real second event
-    expect(input.lookStats.dupEvents).toBe(1);
+  it('does not mistake the browser re-centring the cursor for a broken lock', () => {
+    const input = lockedInput();
+    input.handleMouseMove(move({ mx: 6, cx: 400, t: 1 }));
+    input.handleMouseMove(move({ mx: 6, cx: 400, t: 2 }));
+    // One enormous step: this is what the lock grant itself looks like.
+    input.handleMouseMove(move({ mx: 6, cx: 900, t: 3 }));
+    input.handleMouseMove(move({ mx: 6, cx: 900, t: 4 }));
+    input.handleMouseMove(move({ mx: 6, cx: 900, t: 5 }));
+    expect(input.pointerLockUnreliable).toBe(false);
   });
 
-  it('scales only the held state when the drag multiplier is on', () => {
-    const input = captured();
-    input.dragComp = 0.5;
-    input.handleMouseMove(move({ mx: 8, my: 0, t: 10 }));
-    const free = input.lookDX;
-    input.handleMouseMove(move({ mx: 8, my: 0, buttons: 2, t: 20 }));
-    const total = input.lookDX;
-    expect(total - free).toBeCloseTo(free * 0.5, 10);
-    expect(input.radPerCount('held')).toBeCloseTo(input.radPerCount('free') * 0.5, 10);
-  });
-
-  it('shaves oversized deltas back to the size of ordinary free motion when adaptive', () => {
-    const input = captured();
-    input.lookMode = 'adaptive';
-    for (let i = 0; i < 64; i++) input.handleMouseMove(move({ mx: 2, my: 0, t: 1000 + i }));
-    expect(input.freeMedian()).toBe(2);
-    input.consumeLook(); // drain the reference motion, then measure one event in isolation
-    const cap = 2 * LOOK_PER_PIXEL * 4; // four times an ordinary move, in radians
-    input.handleMouseMove(move({ mx: 400, my: 0, buttons: 1, t: 5000 }));
-    expect(input.lookDX).toBeLessThanOrEqual(cap + 1e-12);
-    expect(input.lookDX).toBeGreaterThan(0);
-    expect(input.lookStats.held.rejected).toBe(1);
-  });
-
-  it('passes a huge delta through untouched in raw mode', () => {
-    // The point of the mode: if the spike survives with every ceiling off, nothing we do to the numbers
-    // is responsible for it.
-    const input = captured();
-    input.lookMode = 'raw';
-    input.handleMouseMove(move({ mx: 400, my: 0, buttons: 1, t: 4000 }));
-    expect(input.lookDX).toBeCloseTo(400 * LOOK_PER_PIXEL, 10);
-    expect(input.consumeLook().dx).toBeCloseTo(400 * LOOK_PER_PIXEL, 10); // frame ceiling off too
-    expect(input.framesClamped).toBe(0);
-  });
-
-  it('counts events it cannot use, so losing capture cannot look like no input', () => {
-    // A button press that silently costs us pointer lock is one hypothesis for the spike. If the
-    // instrument recorded nothing in that state, the hypothesis would be unfalsifiable from the F3
-    // overlay — so events are counted whether or not the world owned the mouse, and the ones it threw
-    // away are tallied separately.
-    const input = captured();
-    input.handleMouseMove(move({ mx: 3, my: 0, buttons: 1, t: 3 }));
-    input.setActive(false); // the world let go of the mouse (menu opened, lock lost, focus gone)
-    input.handleMouseMove(move({ mx: 9, my: 0, buttons: 1, t: 4 }));
-    expect(input.lookStats.held.events).toBe(2);
-    expect(input.lookStats.held.counts).toBe(12);
-    expect(input.lookStats.held.discarded).toBe(1);
-    // The applied total therefore under-counts the measured total: rad/ct drops below what the raw
-    // stream would give, which is what "held but no control" looks like on screen.
-    expect(input.radPerCount('held')).toBeLessThan(input.lookStats.held.counts * LOOK_PER_PIXEL);
-  });
-
-  it('flags movement that arrives while the pointer is only pretending to be locked', () => {
-    // The reading that matters once our own maths is ruled out: under a real lock the cursor cannot move,
-    // so the page's own coordinates sit still while device counts keep flowing. If clientX/Y drifts while
-    // we believe we are locked, the "device counts" are really accelerated cursor travel — and that feels
-    // like the sensitivity skyrocketing, exactly as reported, with nothing wrong in our look code.
-    const input = captured();
-    input.usingLock = true;
-    input.handleMouseMove(move({ mx: 6, my: 0, cx: 500, cy: 300, t: 10 }));
-    input.handleMouseMove(move({ mx: 6, my: 0, cx: 500, cy: 300, t: 11 }));
-    expect(input.lookStats.free.driftEvents).toBe(0);
-    // One big step is a re-centre, not a fake lock, so it must not be reported on its own.
-    input.handleMouseMove(move({ mx: 60, my: 0, cx: 640, cy: 300, t: 12 }));
-    expect(input.lookStats.free.driftEvents).toBe(0);
-    // The cursor running keeps producing travel event after event; that is the thing worth reporting.
-    for (let i = 0; i < 5; i++) input.handleMouseMove(move({ mx: 55, my: 0, cx: 700 + i * 55, cy: 300, t: 20 + i }));
-    expect(input.lookStats.free.driftEvents).toBeGreaterThanOrEqual(3);
-    expect(input.lookStats.free.driftPx).toBeGreaterThan(0);
-  });
-
-  it('separates events that arrived under lock from those that did not', () => {
-    // `movement / clientXY` on F3 cannot tell a real lock from a browser that reports movement anyway, so
-    // the capture state is recorded per event and per button state.
-    const input = captured(); // no document in Node: captured through the cursor-hidden fallback
+  it('gives up on the lock when the cursor runs, and keeps the player in the world', () => {
+    const input = lockedInput();
+    let degraded = 0;
+    input.onLookDegraded = () => degraded++;
+    // The signature of the bug: the page's own coordinates advance event after event while `movementX`
+    // keeps arriving, which is only possible if the cursor is being drawn and moved.
+    for (let i = 0; i < 10; i++) input.handleMouseMove(move({ mx: 34 + i * 12, cx: 400 + i * 90, t: 200 + i }));
+    expect(input.pointerLockUnreliable).toBe(true);
     expect(input.usingLock).toBe(false);
-    input.handleMouseMove(move({ mx: 3, t: 1 }));
-    input.usingLock = true;
-    input.handleMouseMove(move({ mx: 3, t: 2 }));
-    expect(input.lookStats.free.eventsUnlocked).toBe(1);
-    expect(input.lookStats.free.eventsLocked).toBe(1);
+    expect(input.locked).toBe(true); // our correction, not the player's Escape: no pause, no loss of game
+    expect(input.onLookDegraded).toBeTruthy();
+    expect(degraded).toBe(1);
+    expect(input.lockDriftPx).toBeGreaterThan(100);
+    // ...and look still works, now measured off the cursor itself.
+    input.handleMouseMove(move({ mx: 0, cx: 1100, cy: 300, t: 900 }));
+    expect(Math.abs(input.lookDX) + Math.abs(input.lookDY)).toBeGreaterThan(0);
   });
 
-  it('resets without disturbing the session totals that other diagnostics depend on', () => {
-    const input = captured();
-    input.handleMouseMove(move({ mx: 5, my: 0, buttons: 1, t: 7 }));
-    const seen = input.movesSeen;
-    input.resetLookStats();
-    expect(input.lookStats.held.events).toBe(0);
-    expect(input.movesSeen).toBe(seen);
-    expect(input.sessionLookFromMouse).toBeGreaterThan(0);
+  it('never asks for the lock again after giving up on it', () => {
+    // A minimal stand-in for the browser: enough surface for attach()/capture() to run against.
+    let requests = 0;
+    const canvas = {
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      requestPointerLock: () => {
+        requests++;
+        return undefined;
+      },
+    } as unknown as HTMLCanvasElement;
+    const doc = {
+      pointerLockElement: null,
+      body: { classList: { toggle: () => {} } },
+      addEventListener: () => {},
+      removeEventListener: () => {},
+      exitPointerLock: () => {},
+    } as unknown as Document;
+    const had = 'document' in globalThis;
+    const before = (globalThis as Record<string, unknown>).document;
+    (globalThis as Record<string, unknown>).document = doc;
+    try {
+      const input = new Input();
+      input.setCanvas(canvas);
+      input.setActive(true);
+      input.pointerLockUnreliable = true;
+      input.capture();
+      expect(requests).toBe(0); // straight to the cursor-hidden path, quietly
+      expect(input.locked).toBe(true);
+      // Turning it back on is the player's call, and the detection gets to re-earn the verdict.
+      input.setLockMouse(true);
+      expect(input.pointerLockUnreliable).toBe(false);
+    } finally {
+      if (had) (globalThis as Record<string, unknown>).document = before;
+      else delete (globalThis as Record<string, unknown>).document;
+    }
+  });
+
+  it('takes the button press away from the browser instead of letting it start a drag', () => {
+    // The other half of the fix, and the cheaper one: a press must not become a text-selection or element
+    // drag session, because that reroute is what breaks the engine's own lock handling in the first place.
+    let prevented = 0;
+    const input = new Input();
+    input.setActive(true);
+    input.handleMouseDown({
+      button: 0,
+      preventDefault: () => prevented++,
+    } as unknown as MouseEvent);
+    expect(prevented).toBe(1);
+    expect(input.mining).toBe(true);
+    input.handleMouseUp({ button: 0, preventDefault: () => {} } as unknown as MouseEvent);
+    expect(input.mining).toBe(false);
+    // Right button drives placing; middle and the browser back/forward buttons drive nothing, which is
+    // exactly why "any button does it" pointed at the press rather than at an action.
+    input.handleMouseDown({ button: 2, preventDefault: () => prevented++ } as unknown as MouseEvent);
+    expect(input.placing).toBe(true);
+    input.handleMouseDown({ button: 1, preventDefault: () => prevented++ } as unknown as MouseEvent);
+    expect(input.mining).toBe(false);
   });
 });

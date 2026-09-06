@@ -43,6 +43,11 @@ body {
 }
 
 #viewport {
+  /* A button-held drag must never become a browser drag session: that reroutes the mouse stream away
+     from the engine's pointer-lock handling, which is how "the cursor goes wild while a button is held"
+     starts in WebKit. `preventDefault` on the press is the main guard; this is the belt. */
+  -webkit-user-drag: none;
+  -webkit-touch-callout: none;
   position: absolute;
   inset: 0;
   width: 100%;

@@ -439,70 +439,6 @@ async function main() {
       return `free ${free.radPerPx.toFixed(5)} vs held ${held.radPerPx.toFixed(5)} rad/px (ratio ${ratio.toFixed(2)}), touchDrag 0`;
     });
 
-    // The report we cannot reproduce here: "it doesn't matter what mouse button I press — RMB, MMB, even
-    // MOUSE4/5 — holding it down makes the sensitivity skyrocket". Build for that ships three F3 rows that
-    // split look by button state, because a headless browser has no real device, no OS acceleration curve
-    // and no pointer that can be lied to. Those rows are the only thing standing between the next report
-    // and another round of guessing, so they are tested like product: present, carrying per-event magnitude
-    // (rad/ct is LOOK_PER_PIXEL x sensitivity by construction, so on its own it would show nothing), and
-    // agreeing with the shipped constant on a stream whose shape we control exactly.
-    await step('F3 look rows measure per-event magnitude and agree with the look constant (BI-2)', async () => {
-      const r = await page.evaluate(async () => {
-        const g = window.webcraft.game;
-        const yaw0 = g.player.yaw;
-        const pitch0 = g.player.pitch;
-        g.input.resetLookStats();
-        g.input.setActive(true);
-        // Equal feeds in both button states: identical events, so identical per-event magnitude, so the
-        // ratio between the states must be 1. Anything else and the split is lying.
-        const feed = async (n, buttons) => {
-          for (let i = 0; i < n; i++) {
-            const e = new MouseEvent('mousemove', { clientX: 400, clientY: 300, buttons, bubbles: true });
-            Object.defineProperty(e, 'movementX', { value: 20 });
-            Object.defineProperty(e, 'movementY', { value: 0 });
-            window.dispatchEvent(e);
-            await new Promise((res) => requestAnimationFrame(res)); // one event per frame: no frame ceiling
-          }
-        };
-        await feed(20, 0);
-        await feed(20, 1);
-        const m = g.hudModel();
-        const out = {
-          free: m.lookFree,
-          held: m.lookHeld,
-          probe: m.lookProbe,
-          mix: m.look,
-          events: g.input.lookStats.held.events,
-          freeEvents: g.input.lookStats.free.events,
-          ratio: g.input.radPerCount('held') / Math.max(1e-9, g.input.radPerCount('free')),
-          ctPerEv: g.input.lookStats.held.counts / Math.max(1, g.input.lookStats.held.events),
-          radPerCt: g.input.radPerCount('held'),
-          sens: g.input.sensitivity,
-          drift: g.input.lookStats.held.driftEvents,
-        };
-        g.player.yaw = yaw0;
-        g.player.pitch = pitch0;
-        g.input.resetLookStats();
-        return out;
-      });
-      if (r.events !== 20 || r.freeEvents !== 20) throw new Error(`rows lost events: held=${r.events} free=${r.freeEvents}, fed 20 each`);
-      if (Math.abs(r.ratio - 1) > 0.001) throw new Error(`identical feeds came out ${r.ratio.toFixed(3)}x apart — the state split is not honest`);
-      if (Math.abs(r.ctPerEv - 20) > 0.01)
-        throw new Error(`per-event magnitude read wrong: ${r.ctPerEv} ct/ev for a stream of 20-count events`);
-      const expected = 0.0176 * r.sens;
-      if (Math.abs(r.radPerCt - expected) / expected > 0.02)
-        throw new Error(`rad/ct is ${r.radPerCt}, expected ${expected} (LOOK_PER_PIXEL x sensitivity ${r.sens})`);
-      if (!/[0-9]+\.[0-9]{2} ct\/ev/.test(r.held)) throw new Error('held row has no per-event magnitude: ' + r.held);
-      if (!/ratio [0-9.]+x/.test(r.held)) throw new Error('held row has no free-vs-held ratio: ' + r.held);
-      if (!/lk [0-9]+\/[0-9]+/.test(r.held)) throw new Error('held row does not report capture state: ' + r.held);
-      if (!/mode [a-z]+/.test(r.probe) || !/regrab [0-9]+/.test(r.probe) || !/frame-cap [0-9]+/.test(r.probe))
-        throw new Error('probe row is missing mode/regrab/frame-cap: ' + r.probe);
-      if (!/drag [0-9.]+ · pad [0-9.]+ · ui [0-9.]+ rad/.test(r.mix))
-        throw new Error('look line does not show all four sources (a second look path must not be able to hide): ' + r.mix);
-      if (r.drift > 0)
-        throw new Error(`the cursor drifted while pointer lock was held: ${r.drift} events (browser is faking the lock)`);
-      return `20 events x 20 ct -> ${r.radPerCt.toFixed(5)} rad/ct (expected ${expected.toFixed(5)}), rows + ratio + capture split present`;
-    });
 
     const st = await page.evaluate(() => {
       const g = window.webcraft.game;
@@ -659,6 +595,66 @@ async function main() {
     });
 
     // ------------------------------------------------------------ mining with the mouse
+    // The Safari report, which no headless browser will ever show us: *"it doesn't matter what mouse button I
+    // press — RMB, MMB, whatever, even MOUSE4 and 5 (down), that still causes the sensitivity to skyrocket"*,
+    // while Chrome is clean. On macOS a pointer lock is implemented by hiding the cursor and pinning it, and a
+    // button-held drag can hand the mouse stream to the engine's own drag machinery, where the pinning and the
+    // raw-delta substitution stop applying — and the page is never told, because `pointerlockchange` stays
+    // quiet and `pointerLockElement` stays set. `movementX` is then cursor travel with the OS's acceleration
+    // curve on it, growing because nothing recentres any more. That is why any button does it, why releasing
+    // fixes it, and why no ceiling on the numbers can help: the numbers are the lie. So the game notices the
+    // cursor moving under a lock it believes it holds, and stops using the lock — keeping the player in the
+    // world. CI Chrome is not Safari, so we drive that deliberately: claim the lock, make the cursor run.
+    await step('a pointer lock that lets the cursor move is abandoned, without pausing the game (BI-2)', async () => {
+      const before = await page.evaluate(() => window.__pointerLockCalls ?? 0);
+      const r = await page.evaluate(async () => {
+        const g = window.webcraft.game;
+        // Start from the shipped state, not from whatever earlier steps left behind.
+        g.input.pointerLockUnreliable = false;
+        g.input.lockDriftPx = 0;
+        g.input.lockDriftEvents = 0;
+        g.input.usingLock = true; // the state we are in when we believe the mouse is ours
+        let x = 300;
+        for (let i = 0; i < 10; i++) {
+          x += 70;
+          const e = new MouseEvent('mousemove', { clientX: x, clientY: 320, buttons: 1, bubbles: true });
+          Object.defineProperty(e, 'movementX', { value: 40 }); // counts keep arriving, as they do in the bug
+          Object.defineProperty(e, 'movementY', { value: 0 });
+          window.dispatchEvent(e);
+          await new Promise((res) => requestAnimationFrame(res));
+        }
+        const out = {
+          // Read the counter before restoring the setting: putting lockMouse back on legitimately asks the
+          // browser for the lock again, and that is not what this is measuring.
+          lockCallsAfter: window.__pointerLockCalls ?? 0,
+          unreliable: g.input.pointerLockUnreliable,
+          usingLock: g.input.usingLock,
+          locked: g.input.locked,
+          lockMouse: g.input.lockMouse,
+          drift: Math.round(g.input.lockDriftPx),
+          paused: !!document.querySelector('#screen-pause.active'),
+          toast: [...document.querySelectorAll('#toasts *')].pop()?.textContent ?? '',
+          lockRow: g.hudModel().lock,
+        };
+        // Put the world back the way the remaining steps expect it.
+        g.input.pointerLockUnreliable = false;
+        g.input.lockDriftPx = 0;
+        g.input.lockDriftEvents = 0;
+        g.setSettings({ ...g.settings, lockMouse: true });
+        return out;
+      });
+      if (!r.unreliable) throw new Error('a lock that let the cursor run for 10 straight events was not detected');
+      if (r.usingLock) throw new Error('the lock was detected as broken and kept anyway');
+      if (!r.locked) throw new Error('the correction dropped the player out of the world; it must keep them playing');
+      if (r.paused) throw new Error('our own exitPointerLock was read as Escape and paused the game');
+      if (r.lockMouse) throw new Error('the preference was not remembered, so the next session walks into it again');
+      if (!/pointer lock abandoned/.test(r.lockRow)) throw new Error('F3 does not name the live mouse path: ' + r.lockRow);
+      if (!/pointer lock is unreliable/i.test(r.toast)) throw new Error('the change happened silently: ' + r.toast);
+      if (r.lockCallsAfter > before)
+        throw new Error(`asked for the lock again after giving up on it (${r.lockCallsAfter - before} more calls)`);
+      return `drift ${r.drift}px under a claimed lock → lock abandoned, never re-requested, still playing, explained; F3: ${r.lockRow}`;
+    });
+
     await step('holding LMB mines a block (BI-2/AM-2)', async () => {
       const aimed = await page.evaluate(async () => {
         const g = window.webcraft.game;
@@ -1476,6 +1472,15 @@ async function main() {
   log('');
   const failed = results.filter(([good]) => !good);
   log(`${results.length - failed.length}/${results.length} smoke checks passed`);
+  // A runner that only ever says "N/N passed" is silent about the checks it never got to run. This floor
+  // exists because a scripted edit in this repo's own history deleted four steps — F3 fps, mob geometry,
+  // walking the player, the sprint-jump input buffer — and every remaining check went green. If a deliberate
+  // change makes the suite smaller, lower it in the same commit that explains why.
+  const MIN_CHECKS = 62;
+  if (results.length < MIN_CHECKS) {
+    log(`\nonly ${results.length} checks ran, this suite runs ${MIN_CHECKS}+ — steps going missing is not the same as steps passing`);
+    process.exitCode = 1;
+  }
   if (failed.length) {
     log('\nfailures:');
     for (const [good, name] of failed) if (!good) log('  - ' + name);
