@@ -66,9 +66,20 @@ async function startWorld(page, { name, seed, mode = 'survival' }) {
   await page.waitForFunction(() => !!window.webcraft?.game && !document.querySelector('.screen.active'), null, {
     timeout: 60000,
   });
-  // The world only owns the mouse after a click into it; take ownership the way a player's first
-  // click would — a real gesture, which is what Pointer Lock requires.
+  // The world asks for the mouse the moment it is on screen and takes it at the first gesture, because
+  // a browser will not hand one over without a gesture. This click *is* that gesture, so it has to end
+  // with the world owning the mouse — the reported bug was a fresh world whose mouse did nothing, click
+  // or no click, until the player pressed Escape and resumed (that path captured, the load path did not).
   await page.mouse.click(640, 400);
+  try {
+    await page.waitForFunction(() => !!window.webcraft?.game.input.locked, null, { timeout: 8000 });
+  } catch {
+    const dead = await page.evaluate(() => {
+      const i = window.webcraft.game.input;
+      return { locked: i.locked, wantCapture: i.wantCapture, active: i.active, lockMouse: i.lockMouse };
+    });
+    throw new Error(`the first click into a fresh world did not take the mouse: ${JSON.stringify(dead)}`);
+  }
   await page.waitForTimeout(300);
 }
 
@@ -133,7 +144,10 @@ async function main() {
   let browser;
   try {
     browser = await chromium.launch({
-      channel: 'chrome',
+      // System Chrome by default — the engine the game is played in. Override it (SMOKE_CHANNEL=
+      // chromium) to run the tour in whichever browser Playwright has downloaded, which is how this
+      // suite gets run on a machine with no Chrome installed.
+      channel: process.env.SMOKE_CHANNEL || 'chrome',
       headless: true,
       args: [
         '--use-angle=swiftshader', // software WebGL2 so the suite runs anywhere
@@ -183,6 +197,28 @@ async function main() {
       }
       await page.screenshot({ path: join(SHOTS, '00-menu.png') });
       return 'WebGL2 available';
+    });
+
+    /*
+     * Every "Back" button has to leave the screen it sits on. The world list used to be a root screen,
+     * which meant it was its own return target: "Select World" then "Back" re-opened the screen that was
+     * already open and looked completely dead — the report was literally "click Select World, then Back
+     * does nothing". Round-tripping twice also catches a return target that gets consumed on the first trip.
+     */
+    await step('Back on every menu screen returns to the main menu (MM-1)', async () => {
+      const visit = async (openId, screenId) => {
+        await page.click(openId);
+        await page.waitForFunction(isActive(screenId), null, { timeout: 8000 });
+        await page.click(`#${screenId} button[data-back]`);
+        await page.waitForFunction(isActive('screen-main'), null, { timeout: 8000 });
+      };
+      await visit('#btn-worlds', 'screen-worlds');
+      await visit('#btn-worlds', 'screen-worlds'); // the target survived the first trip
+      await visit('#btn-help', 'screen-help');
+      await visit('#btn-about', 'screen-about');
+      await visit('#btn-settings', 'screen-settings');
+      if (!(await page.evaluate(isActive('screen-main')))) throw new Error('ended somewhere other than the main menu');
+      return 'worlds ×2, help, about, settings';
     });
 
     // ------------------------------------------------------------ create & load a world
@@ -1570,6 +1606,23 @@ async function main() {
         timeout: 15000,
       });
       return `${before} → ${before - 1} slots`;
+    });
+
+    /*
+     * "Save & quit" ends on the world list with the game gone. Back there must land on the main menu —
+     * the return target recorded while playing still said "pause", and a pause screen with no world
+     * behind it is not a screen anyone should be shown.
+     */
+    await step('Back from the world list after quitting lands on the main menu', async () => {
+      if (!(await page.evaluate(isActive('screen-worlds')))) throw new Error('not on the world list to begin with');
+      await page.click('#screen-worlds button[data-back]');
+      await page.waitForFunction(isActive('screen-main'), null, { timeout: 8000 });
+      const orphanPause = await page.evaluate(() => !!document.querySelector('#screen-pause.active'));
+      if (orphanPause) throw new Error('Back opened a pause screen with no game behind it');
+      // leave the tour where the next step expects it: on the world list
+      await page.click('#btn-worlds');
+      await page.waitForFunction(isActive('screen-worlds'), null, { timeout: 10000 });
+      return 'main menu, then back to the list';
     });
 
     // ------------------------------------------------------------ creative sanity

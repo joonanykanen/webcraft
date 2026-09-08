@@ -186,7 +186,7 @@ the tab is hidden.
 ## Testing
 
 ```
-npm run test         # 217 vitest tests (14 files, ~11 s, Node environment)
+npm run test         # 234 vitest tests (15 files, ~12 s, Node environment)
 npm run typecheck    # strict TS, noUnusedLocals/Parameters, verbatimModuleSyntax
 npm run check        # typecheck + tests + production build
 npm run smoke        # real Chrome end-to-end (see below)
@@ -204,11 +204,12 @@ npm run verify       # everything
 | `tests/entities.test.ts` | explosion radius & witnesses, indestructible/fluid survival, TNT chaining and fuse, diff recording, gravity blocks and re-placing, drop pickup/expiry, mob caps/despawn/loot/chase/creative-immunity, day-vs-night spawn rules, sunburn, mob save round-trip |
 | `tests/survival.test.ts` | fall/landing/jump/walk/sprint/sneak speeds, jump input buffering + coyote time, fall damage + water + creative immunity, flight gating, breath & drowning & refill, hunger/starvation/regeneration/eating, damage window, respawn, void safety net |
 | `tests/worldgen-structure.test.ts` | trees actually grow trunks (no floating canopies), trunk columns are contiguous and stand on solid ground, no bare log tip pokes through a canopy, cacti on desert sand, all 7 biomes occur in sane shares, snow reaches the surface |
-| `tests/input.test.ts` | capture with and without pointer lock, Escape always reaches the app, menu ownership clears held keys, look only while the world owns the mouse, identical look with/without LMB held, per-event clamp + NaN rejection + implausible coordinate jumps, sprint aliases (Ctrl, Alt, Caps Lock, double-tap W), jump buffering + stale-tap expiry, touch merge, wheel |
+| `tests/input.test.ts` | capture with and without pointer lock, Escape always reaches the app, menu ownership clears held keys, look only while the world owns the mouse, the world taking the mouse at the first click/key press it is waiting for (and not on `Escape`, nor on a tap while touch controls are on), identical look with/without LMB held, per-event clamp + NaN rejection + implausible coordinate jumps, sprint aliases (Ctrl, Alt, Caps Lock, double-tap W), jump buffering + stale-tap expiry, touch merge, wheel |
 | `tests/milestones.test.ts` | unlock from observed play, quantity counting, requirement gating + retroactive unlock, the whole 21-goal chain is completable, save/load round-trip with unknown ids dropped, `warmUp` stays silent during load, definition integrity (unique ids, declared-before-used requirements, non-empty goals) |
 | `tests/geometry.test.ts` | face/tile mapping incl. the dedicated front face, centred vs cell-aligned bounds, non-uniform scale, per-face tints, the entity V-flip (mob faces) and UV corners staying strictly inside the `fract()` range |
 | `tests/daynight.test.ts` | the shared day/night curve: day and night plateaux, a monotone twilight band, the brightest change happening *while the sun is at the horizon* and never exceeding 2 %/s, agreement with `Game.nightFactor()`, and the `DayClock`: exact rate, wrap, garbage frames ignored, and pinning to "the current time" being a no-op (the autosave jump) |
 | `tests/uv-orientation.test.ts` | the vertical UV convention: the highest vertex of every face and every hand-built cross quad (torch, plants) carries the largest `aUV.y`, and the shader mirrors inside the tile rather than flipping the atlas |
+| `tests/menu-nav.test.ts` | every `Back` leaves the screen it sits on: the world list is an overlay and never its own return target, Settings opened from the pause menu returns to the pause menu, and a quit world leaves no in-game panel to go back to |
 
 ### Golden world hashes
 
@@ -222,22 +223,22 @@ new generation in chunks nobody touched).
 ### Browser smoke test
 
 ```
-npm run smoke     # vite preview + real Chrome (66 checks, ~3 min)
+npm run smoke     # vite preview + real Chrome (73 checks, ~3 min)
 npm run verify    # check + smoke
 ```
 
 `scripts/smoke.mjs` serves the production build and drives **system Chrome** headless on
 SwiftShader WebGL2 (`playwright-core`, no browser download). Every section is a step, so one
 broken feature cannot cascade into the rest, and the run fails on any uncaught page error.
-It covers: capability probe → world creation form → terrain streaming → HUD structure (hearts and
+It covers: capability probe → menu navigation (`Back` on the world list, Help, About and Settings must all land on the main menu, and the world list after *Save & quit* must not land on an orphaned pause screen) → world creation form → terrain streaming → HUD structure (hearts and
 hunger measured flush against the hotbar, on one shared baseline) → **the projection matching the
 canvas box at three different window sizes** (the aspect bug below was invisible in a single
 screenshot) → the milestone tracker showing the next goal → the
 milestone panel (21 cards, requirement gating, `Esc` back to the pause menu, a log mined unlocks
 the first one) → live game state → trees near spawn have trunks →
 `F3` overlay (>5 fps) → a mob spawned in front of the camera with finite transforms →
-`W` locomotion → a real mouse move turning the camera (asserting the mouse was actually grabbed, and
-that rad/px is the same with LMB held as free) → hold-LMB mining (polls for the
+`W` locomotion → a real mouse move turning the camera (asserting the mouse was actually grabbed — by the
+first click after the load, which is the step above — and that rad/px is the same with LMB held as free) → hold-LMB mining (polls for the
 break, so it is not timing-fragile) → RMB placement + a planted crafting table → `E` panel
 (9 + 27 slots, 2×2 or 3×3 depending on table range, 25-entry recipe book) → clicking a
 recipe crafts it → torch block light (0 → 14) → pause stats → save → quit → **Play again**
@@ -259,7 +260,8 @@ that remained went green.
 **Always `npx vite build` before `npm run smoke`** — the suite serves `dist/`, so a stale build
 produces a cascade of misleading failures (one broken frame-counter reset once produced 17/36).
 `vite preview` also binds IPv6 only here, so probe scripts must use `http://localhost:PORT`,
-not `127.0.0.1`.
+not `127.0.0.1`. Set `SMOKE_CHANNEL=chromium` to run the tour in whichever browser Playwright has
+downloaded instead of system Chrome — how the suite gets run on a machine with no Chrome installed.
 
 **Look at the screenshots.** `smoke/*.png` are part of the test: assertions on numbers pass
 while the frame is obviously wrong. More than a dozen real bugs were found that way — or by
@@ -382,7 +384,32 @@ probing something a screenshot raised — and all are now covered:
   an animal. Heads now sit on the body with a little overlap, like a neck;
 * a non-finite `movementX` (the first event after a focus change) went straight into `Player.look`,
   making yaw/pitch NaN and therefore *every* coordinate NaN — an empty world. Input sanitises deltas
-  and the player rejects non-finite look input.
+  and the player rejects non-finite look input;
+* **`Select World` → `Back` did nothing at all.** No error, no scroll, no visible change: the button
+  re-showed the screen it was already on. `show()` recorded *the screen it had just shown* as the
+  return target, and the world list counted as a root screen, so its own return target was itself.
+  Help/About/Settings were only spared by being listed as overlays by hand. Now `OVERLAY_SCREENS`
+  names what is visited rather than owned (`worlds` included), `detachGame()` clears a return target
+  that no longer exists, and `backTarget()` — exported and unit-tested in `tests/menu-nav.test.ts`
+  — refuses to name the screen it is standing on, so a stale target is a working button instead of a
+  dead one. Quitting to the world list then pressing `Back` used to point at the pause screen of a
+  game that had already been disposed; it lands on the main menu now;
+* **a fresh world never took the mouse**: *"I can't move around, even if I click the screen — only
+  after I press ESC and resume does the mouse work."* Both halves of that report were accurate, and
+  the second half was the clue. A world starts out with `screen === 'none'`, so the
+  `setScreen('none')` transition that hands the mouse over never runs after a load, and the
+  `setActive(true)` at the end of `play()` was a no-op because starting the loop had already handed
+  the keyboard over. `wantCapture` — "the world wants the mouse, the player has not clicked into it
+  yet" — was read by nothing and set by nothing: `requestCapture()` had no caller and `mousedown` did
+  not capture. `Escape`-and-resume worked because *that* path goes through `setScreen('none')`.
+  `play()` now calls `requestCapture()` and the first `mousedown` (or key press) into the world pays
+  it off with `capture()`: a browser will not hand over a pointer without a user gesture, so the wish
+  has to wait for one. `Escape` is excluded (it is about to pause and needs the cursor back), as is a
+  tap while touch controls are on (a finger has no cursor to hide), and the capturing click does not
+  also swing the pick. Smoke requires the first click of `create world starts the game` to end with the
+  world owning the mouse, and `scripts/probe-backmouse.mjs` walks both reports — menu `Back` and the
+  load-time mouse — in one short tour, checking each from a fresh main menu so one broken screen
+  cannot hide the others.
 
 Driving notes for whoever edits it next: the world owns the mouse through `Input.capture()` /
 `release()` (`input.locked` means "the world has the cursor", not browser pointer lock), the test
@@ -454,6 +481,17 @@ dialog and `Esc` gives it back. Locking is the only model that survives the way 
 two monitors, click-and-hold mining, dragging past the edge of the window. The old cursor-hidden
 mode (raw `movementX/Y`, nothing grabbed) is still there as an automatic fallback when the request is
 refused — and as a setting, *Lock mouse while playing*, for anyone who would rather keep the cursor.
+
+A world that has just finished loading has not grabbed anything yet, and that gap is deliberate:
+`play()` calls `input.requestCapture()`, the cursor stays visible over the world, and the first
+`mousedown` — or the first key press — pays the wish off with `capture()`. It has to be that way round,
+because a browser will not hand over the pointer outside a user gesture, and by the time terrain
+generation and meshing are done the click that started the load is long expired. `Escape` never captures
+(its job is to pause, which wants the cursor back), a tap does not capture while touch controls are on
+(a finger has no cursor to hide), and handing the keyboard to a menu cancels a pending request.
+`input.wantCapture` is the observable: `true` means the world is waiting for a gesture; `false` while
+`input.locked` is also `false` means it was never asked — which is what a fresh world with a dead mouse
+looked like from the outside.
 
 Three things had to be true before locking could be the default, and all three are covered by tests:
 
