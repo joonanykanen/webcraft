@@ -273,6 +273,13 @@ export class Input {
     // Escape always reaches the app — even while a menu owns the keyboard — so ONE press pauses
     // and one press resumes.
     if (this.active || this.uiKeys || e.code === 'Escape') this.onKeyDown?.(e.code, e);
+    // A key press is a guaranteed user gesture. If the world asked for the mouse right after a load
+    // and nobody has clicked into it yet, take it here so the mouse is never dead while the keyboard
+    // works. `active` is false again if this very key opened a panel, and Escape is about to pause —
+    // both of those want the cursor back, so neither gets a capture.
+    if (this.active && this.wantCapture && !this.locked && !this.touch.enabled && e.code !== 'Escape') {
+      this.capture();
+    }
   };
 
   private keyUp = (e: KeyboardEvent) => {
@@ -304,6 +311,26 @@ export class Input {
     // game view regardless of whether a bug depends on it, but it did NOT resolve the reported spike.
     e.preventDefault();
     if (!this.active) return;
+    /*
+     * A click into the world is the gesture that takes the mouse.
+     *
+     * Right after a load nothing else does it: the game starts out with `screen === 'none'`, so no
+     * `setScreen('none')` transition ever runs, and `setActive(true)` was already true and returned
+     * immediately. `wantCapture` was the only state that could describe "waiting for this gesture", and
+     * nothing raised it and nothing answered it here — which is the whole reason a fresh world had a
+     * mouse that did nothing until the player pressed Escape and resumed. `requestCapture()` raises the
+     * flag; this is where it gets paid off.
+     *
+     * Left alone while touch controls are on: a tap reaches the page as a `mousedown` too, and grabbing
+     * the pointer for a finger would take the cursor away from a player who has no cursor.
+     *
+     * The press that hands over the mouse is not also a swing of the pick, so it does not fall through
+     * to the mining/placing branches.
+     */
+    if (this.wantCapture && !this.locked && !this.touch.enabled) {
+      this.capture();
+      return;
+    }
     if (e.button === 0) this.mining = true;
     if (e.button === 2) this.placing = true;
     // Middle click and the browser back/forward buttons: deliberately ignored. Worth stating because
@@ -431,6 +458,7 @@ export class Input {
 
   /** Take the mouse: hide the cursor, movement drives the camera. */
   capture(): void {
+    this.wantCapture = false; // whichever way this comes out, the world has its answer
     if (this.lockMouse && this.active && typeof document !== 'undefined') {
       this.requestLock();
       return;

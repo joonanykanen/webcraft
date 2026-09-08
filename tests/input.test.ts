@@ -476,3 +476,95 @@ describe('a pointer lock that is not really holding (BI-2)', () => {
     expect(input.mining).toBe(false);
   });
 });
+
+/**
+ * The dead-mouse report: *"when I create a new world the mouse doesn't get activated — I can't look
+ * around, even clicking the screen does nothing; only pressing Escape and resuming fixes it."*
+ *
+ * A world starts out already on screen `none`, so the `setScreen('none')` transition that normally
+ * hands the mouse over never runs, and `setActive(true)` after the load was a no-op because starting
+ * the loop had already handed the keyboard over. `wantCapture` — "the world wants the mouse and the
+ * player has not clicked into it yet" — was raised by nothing and answered by nobody, so the mouse
+ * stayed free and `mouseMove` threw every delta away. Escape-and-resume worked because *that* path
+ * goes through `setScreen('none')`, which does capture.
+ *
+ * Browsers only hand over the pointer inside a user gesture, so the fix is the missing handshake: ask
+ * for the capture when the world comes up (`requestCapture()`), and take it at the first click or key
+ * press. Escape is deliberately excluded — its job is to pause, which wants the cursor back.
+ */
+describe('a fresh world takes the mouse on the first gesture (dead-mouse regression)', () => {
+  const press = (button = 0) => ({ button, preventDefault: () => {} }) as unknown as MouseEvent;
+
+  it('a click into the world takes the mouse that requestCapture() asked for', () => {
+    const input = new Input();
+    input.setActive(true);
+    // The world is on screen and owns the keyboard, but no browser hands over a pointer without a
+    // gesture, so nothing is captured yet.
+    expect(input.locked).toBe(false);
+
+    input.requestCapture();
+    input.handleMouseDown(press());
+    expect(input.locked).toBe(true);
+    expect(input.wantCapture).toBe(false);
+    // The press that hands over the mouse is not also a swing of the pick…
+    expect(input.mining).toBe(false);
+    // …the next one is, and look has been live since the click.
+    input.handleMouseDown(press());
+    expect(input.mining).toBe(true);
+    input.handleMouseMove(pointer({ movementX: 12, movementY: -6 }));
+    expect(input.lookDX).toBeCloseTo(12 * LOOK_PER_PIXEL);
+    expect(input.lookDY).toBeCloseTo(-6 * LOOK_PER_PIXEL);
+  });
+
+  it('a key press takes it too, so a working keyboard never comes with a dead mouse', () => {
+    const input = new Input();
+    input.setActive(true);
+    input.requestCapture();
+    input.handleKeyDown(key('KeyW'));
+    expect(input.locked).toBe(true);
+  });
+
+  it('Escape does not take it, because it is about to pause and needs the cursor back', () => {
+    const input = new Input();
+    input.setActive(true);
+    input.requestCapture();
+    input.onKeyDown = (code) => {
+      if (code === 'Escape') input.setActive(false); // what Game.setScreen('pause') does
+    };
+    input.handleKeyDown(key('Escape'));
+    expect(input.locked).toBe(false);
+    expect(input.wantCapture).toBe(false);
+  });
+
+  it('no capture is requested while touch controls are on: a tap is not a cursor', () => {
+    // A tap reaches the page as a `mousedown` as well. Grabbing the pointer for a finger would hide a
+    // cursor that was never there and switch the look source out from under drag-to-look.
+    const input = new Input();
+    input.setActive(true);
+    input.touch.enabled = true;
+    input.requestCapture();
+    input.handleMouseDown(press());
+    input.handleKeyDown(key('KeyW'));
+    expect(input.locked).toBe(false);
+  });
+
+  it('handing the keyboard to a menu cancels a pending request', () => {
+    const input = new Input();
+    input.setActive(true);
+    input.requestCapture();
+    input.setActive(false); // the pause menu took over before the player clicked
+    expect(input.wantCapture).toBe(false);
+    input.setActive(true);
+    expect(input.locked).toBe(false); // re-owning the keyboard is not itself a capture
+    input.handleMouseDown(press());
+    expect(input.mining).toBe(true); // a click that is not a capture is a normal click again
+  });
+
+  it('capturing directly (resume from pause) needs no pending request', () => {
+    const input = new Input();
+    input.setActive(true);
+    input.capture();
+    expect(input.locked).toBe(true);
+    expect(input.wantCapture).toBe(false);
+  });
+});

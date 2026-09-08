@@ -333,7 +333,9 @@ export class Game implements EntityHost {
   start(): void {
     if (this.running) return;
     this.running = true;
-    this.input.active = this.screen === 'none'; // hand the keyboard over to the game
+    // hand the keyboard over to the game — through setActive(), so ownership of `active` and of the
+    // held-key cleanup lives in one place
+    this.input.setActive(this.screen === 'none');
     this.lastFrame = performance.now();
     this.loop(this.lastFrame);
   }
