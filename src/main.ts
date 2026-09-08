@@ -355,7 +355,14 @@ async function play(record: WorldRecord, fresh: boolean): Promise<void> {
   menus.show('none');
   // Mouse look needs no browser permission: the cursor simply disappears over the world and the
   // first click captures it. Nothing to hint about, nothing for the browser to warn about.
+  //
+  // Asking for the capture is the missing half. `screen` is already 'none' here, so no setScreen()
+  // transition takes the mouse over, and `setActive(true)` below is a no-op because start() already
+  // handed the keyboard over — the world came up with a mouse that did nothing until the first
+  // Escape-and-resume. `requestCapture()` parks the wish until a click or a key press (browsers only
+  // hand over the pointer inside a user gesture) lets us have it.
   g.input.setActive(true);
+  g.input.requestCapture();
   startHudLoop();
 }
 

@@ -41,6 +41,32 @@ export interface MenuCallbacks {
   notify(text: string, kind?: 'info' | 'warn' | 'good'): void;
 }
 
+/**
+ * Screens you *visit* from somewhere else: their "Back" returns to wherever they were opened from.
+ * Every other screen is a root, and becomes the return target itself when shown.
+ *
+ * `worlds` belongs in this list. It used to be a root, so showing it wrote its own name down as the
+ * return target and "Back" re-opened the screen it was already on — the reported "Select World, then
+ * Back does nothing".
+ */
+const OVERLAY_SCREENS: readonly ScreenName[] = ['settings', 'help', 'about', 'milestones', 'worlds'];
+
+/**
+ * Which screen the "Back" button on `screen` should show. Pure, so the rule is testable without a DOM.
+ *
+ * Two rules beyond the obvious one: a screen is never its own back target (fall back to the main menu,
+ * which is what makes a stale return target a working button instead of a dead one), and the panels of
+ * a world that has been quit are gone — backing out of the world list after "Save & quit" lands on the
+ * main menu, not on a pause screen with no game behind it.
+ */
+export function backTarget(screen: ScreenName, returnTo: ScreenName, hasGame: boolean): ScreenName {
+  if (screen === 'settings' && hasGame) return 'pause'; // settings is also the pause menu's settings
+  if (!hasGame && (returnTo === 'pause' || returnTo === 'death' || returnTo === 'inventory' || returnTo === 'chest' || returnTo === 'milestones')) {
+    return 'main';
+  }
+  return returnTo === screen ? 'main' : returnTo;
+}
+
 const SCREEN_IDS: Record<ScreenName, string | null> = {
   loading: 'screen-loading',
   unsupported: 'screen-unsupported',
@@ -95,7 +121,7 @@ export class Menus {
   // ------------------------------------------------------------ screen stack
   show(name: ScreenName): void {
     // overlay screens keep the screen they were opened from, so "Back" returns there
-    if (name !== 'settings' && name !== 'help' && name !== 'about' && name !== 'milestones') {
+    if (!OVERLAY_SCREENS.includes(name)) {
       this.returnTo = name === 'none' ? 'main' : name;
     }
     this.current = name;
@@ -122,6 +148,9 @@ export class Menus {
 
   detachGame(): void {
     this.game = null;
+    // The world is gone, so no in-game panel is a valid "Back" target any more — quitting to the world
+    // list must leave the main menu as the way out.
+    this.returnTo = 'main';
   }
 
   private updatePauseMeta(): void {
@@ -146,7 +175,7 @@ export class Menus {
     };
 
     for (const back of Array.from(document.querySelectorAll<HTMLButtonElement>('button[data-back]'))) {
-      back.addEventListener('click', () => this.show(this.current === 'settings' && this.game ? 'pause' : this.returnTo));
+      back.addEventListener('click', () => this.show(backTarget(this.current, this.returnTo, !!this.game)));
     }
 
     click('btn-quick-start', () => {
